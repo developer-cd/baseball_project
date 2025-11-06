@@ -25,6 +25,8 @@ import {
   Activity
 } from "lucide-react";
 import { Button } from "./ui/button";
+import { Stage, Layer, Line as KonvaLine, Arrow as KonvaArrow } from "react-konva";
+import { useRef } from "react";
 import { Input } from "./ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { useSocket } from "../context/SocketContext";
@@ -59,7 +61,17 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
     isConnected, 
     saveAdminPositions, 
     updateAdminPositions, 
-    clearAdminPositions 
+    clearAdminPositions,
+    saveAdminGuidelines,
+    updateAdminGuidelines,
+    clearAdminGuidelines,
+    requestUserGuidelines,
+    requestUserPositions,
+    getGuidelines,
+    getAdminPositions,
+    hasAdminPositions,
+    adminPositions,
+    adminGuidelines
   } = useSocket();
 
   // Field control state
@@ -77,6 +89,28 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
 
   const [selectedScenario, setSelectedScenario] = useState('Base Positions');
   const [adminDragging, setAdminDragging] = useState(null);
+  const [fieldMode, setFieldMode] = useState('positions'); // 'positions' or 'guidelines'
+
+  // Guidelines state
+  const [shapes, setShapes] = useState([]); // {id,type,points:[%],stroke,strokeWidth}
+  const [tool, setTool] = useState('arrow'); // 'line' | 'arrow' | 'dottedArrow'
+  const [stroke, setStroke] = useState('#000000'); // black default
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [tempPoints, setTempPoints] = useState([]); // in % while drawing
+  const fieldContainerRef = useRef(null);
+
+  const toPixels = (percentPoints, ref) => {
+    const el = ref.current;
+    if (!el || !percentPoints || percentPoints.length < 2) return [];
+    const w = el.clientWidth || 1;
+    const h = el.clientHeight || 1;
+    const out = [];
+    for (let i = 0; i < percentPoints.length; i += 2) {
+      out.push((percentPoints[i] / 100) * w);
+      out.push((percentPoints[i + 1] / 100) * h);
+    }
+    return out;
+  };
 
   // Scenario-based positions
   const scenarioPositions = {
@@ -151,7 +185,10 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
   // Admin drag and drop handlers
   const handleAdminMouseDown = (key, e) => {
     e.preventDefault();
-    setAdminDragging(key);
+    // Only allow dragging in positions mode
+    if (fieldMode === 'positions') {
+      setAdminDragging(key);
+    }
   };
 
   const handleAdminMouseMove = (e) => {
@@ -272,19 +309,111 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
   const handleClearPositions = () => {
     if (isConnected) {
       clearAdminPositions(selectedScenario);
+      // Reset to default positions after clearing
+      if (scenarioPositions[selectedScenario]) {
+        setPositions(scenarioPositions[selectedScenario]);
+      }
       alert('Positions cleared successfully!');
     } else {
       alert('Not connected to server. Please refresh and try again.');
     }
   };
 
+  // Load saved positions for a scenario
+  const loadSavedPositions = async (scenario) => {
+    try {
+      // First try to get from socket context (in-memory cache)
+      const adminData = getAdminPositions(scenario);
+      if (adminData && adminData.positions) {
+        setPositions(adminData.positions);
+        return;
+      }
+
+      // If not in cache, fetch from API
+      const response = await axios.get(`/api/admin/positions/${encodeURIComponent(scenario)}`);
+      if (response.data.success && response.data.fieldPosition) {
+        const savedPositions = response.data.fieldPosition.positions;
+        if (savedPositions && Object.keys(savedPositions).length > 0) {
+          // Mongoose Map is already converted to object in JSON response
+          // Ensure all required fields exist
+          const positionsObj = {};
+          Object.keys(savedPositions).forEach(key => {
+            const pos = savedPositions[key];
+            if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+              positionsObj[key] = {
+                x: pos.x,
+                y: pos.y,
+                color: pos.color || scenarioPositions[scenario]?.[key]?.color || 'bg-gray-500',
+                label: pos.label || key
+              };
+            }
+          });
+          if (Object.keys(positionsObj).length > 0) {
+            setPositions(positionsObj);
+            return;
+          }
+        }
+      }
+      // No saved positions found, use defaults
+      if (scenarioPositions[scenario]) {
+        setPositions(scenarioPositions[scenario]);
+      }
+    } catch (error) {
+      console.error('Error loading saved positions:', error);
+      // On error, use defaults
+      if (scenarioPositions[scenario]) {
+        setPositions(scenarioPositions[scenario]);
+      }
+    }
+  };
+
   // Change scenario
   const handleScenarioChange = (scenario) => {
     setSelectedScenario(scenario);
-    if (scenarioPositions[scenario]) {
-      setPositions(scenarioPositions[scenario]);
+    // Load saved positions for this scenario (or defaults if not saved)
+    loadSavedPositions(scenario);
+    // Also request via socket for real-time updates
+    if (isConnected) {
+      requestUserPositions(scenario);
     }
+    // Load guidelines for this scenario
+    requestUserGuidelines(scenario);
+    const g = getGuidelines(scenario);
+    setShapes(g?.shapes || []);
   };
+
+  // On mount, load current scenario positions and guidelines
+  useEffect(() => {
+    const loadInitialData = async () => {
+      // Load saved positions for initial scenario
+      await loadSavedPositions(selectedScenario);
+      // Request via socket for real-time updates
+      if (isConnected) {
+        requestUserPositions(selectedScenario);
+      }
+      // Load guidelines
+      requestUserGuidelines(selectedScenario);
+    };
+    loadInitialData();
+  }, [isConnected]);
+
+  // Sync positions from socket context when they arrive (for real-time updates)
+  useEffect(() => {
+    if (isConnected && hasAdminPositions(selectedScenario)) {
+      const adminData = getAdminPositions(selectedScenario);
+      if (adminData && adminData.positions) {
+        setPositions(adminData.positions);
+      }
+    }
+  }, [selectedScenario, isConnected, adminPositions, getAdminPositions, hasAdminPositions]);
+
+  // Keep local shapes in sync with broadcasts/updates
+  useEffect(() => {
+    const g = getGuidelines(selectedScenario);
+    if (g && Array.isArray(g.shapes)) {
+      setShapes(g.shapes);
+    }
+  }, [adminGuidelines, selectedScenario]);
 
   // Fetch admin statistics
   const fetchStats = async () => {
@@ -664,6 +793,9 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-green-50/30 to-blue-50/30 tech-grid">
+      {/* helper to convert % points to pixels */}
+      {/* placed inside component scope */}
+      {null}
       {/* Animated background elements */}
       <div className="fixed inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-20 left-20 w-72 h-72 bg-green-500/5 rounded-full blur-3xl animate-float" />
@@ -1111,21 +1243,255 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
                   </div>
                 </div>
 
-                {/* Interactive Field */}
-                <div className="glass-panel rounded-2xl p-6 border border-white/20">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-semibold text-foreground">Interactive Field</h3>
-                    <div className="flex items-center gap-2">
-                      <Button onClick={handleSavePositions} className="bg-green-600 hover:bg-green-700">
-                        <Save className="w-4 h-4 mr-2" />
-                        Save Positions
+                {/* Mode Selector */}
+                <div className="glass-panel rounded-2xl p-4 border border-white/20">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold text-foreground mb-0">Select Mode</h3>
+                    <div className="flex items-center gap-3">
+                      <Button 
+                        onClick={() => setFieldMode('positions')}
+                        className={fieldMode === 'positions' ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-200 hover:bg-gray-300'}
+                        variant={fieldMode === 'positions' ? 'default' : 'outline'}
+                      >
+                        <Target className="w-4 h-4 mr-2" />
+                        Set Positions
                       </Button>
-                      <Button onClick={handleClearPositions} variant="destructive">
-                        <RotateCcw className="w-4 h-4 mr-2" />
-                        Clear
+                      <Button 
+                        onClick={() => setFieldMode('guidelines')}
+                        className={fieldMode === 'guidelines' ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-gray-200 hover:bg-gray-300'}
+                        variant={fieldMode === 'guidelines' ? 'default' : 'outline'}
+                      >
+                        <Move className="w-4 h-4 mr-2" />
+                        Set Guidelines
                       </Button>
                     </div>
                   </div>
+                  <p className="text-sm text-muted-foreground mt-3">
+                    {fieldMode === 'positions' 
+                      ? '📍 Click "Set Positions" to move players on the field. Drag players to set their positions.' 
+                      : '✏️ Click "Set Guidelines" to draw arrows and lines. Use drawing tools below to create guidelines.'}
+                  </p>
+                </div>
+
+                {/* Interactive Field */}
+                <div className="glass-panel rounded-2xl p-6 border border-white/20">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-semibold text-foreground">
+                      {fieldMode === 'positions' ? 'Position Players' : 'Draw Guidelines'}
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      {fieldMode === 'positions' ? (
+                        <>
+                          <Button onClick={handleSavePositions} className="bg-green-600 hover:bg-green-700">
+                            <Save className="w-4 h-4 mr-2" />
+                            Save Positions
+                          </Button>
+                          <Button onClick={handleClearPositions} variant="destructive">
+                            <RotateCcw className="w-4 h-4 mr-2" />
+                            Clear Positions
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button onClick={() => {
+                        console.log('Saving guidelines', { scenario: selectedScenario, shapesCount: shapes.length });
+                        if (!isConnected) { 
+                          alert('Not connected to server. Please refresh and try again.');
+                          return;
+                        }
+                        saveAdminGuidelines(selectedScenario, shapes);
+                        
+                        // Show success popup
+                        const showSuccessPopup = () => {
+                          const popup = document.createElement('div');
+                          popup.style.cssText = `
+                            position: fixed;
+                            top: 0;
+                            left: 0;
+                            width: 100vw;
+                            height: 100vh;
+                            background: rgba(0, 0, 0, 0.5);
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            z-index: 99999;
+                            font-family: Arial, sans-serif;
+                          `;
+                          
+                          const contentDiv = document.createElement('div');
+                          contentDiv.style.cssText = `
+                            background: white;
+                            padding: 40px;
+                            border-radius: 20px;
+                            text-align: center;
+                            max-width: 400px;
+                            width: 90%;
+                            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+                          `;
+                          
+                          const title = document.createElement('h2');
+                          title.textContent = '✅ Success!';
+                          title.style.cssText = `
+                            color: #10b981;
+                            margin-bottom: 20px;
+                            font-size: 28px;
+                            font-weight: bold;
+                          `;
+                          
+                          const message = document.createElement('p');
+                          message.textContent = `You have successfully saved guidelines for "${selectedScenario}"!`;
+                          message.style.cssText = `
+                            color: #374151;
+                            margin-bottom: 30px;
+                            font-size: 18px;
+                            line-height: 1.5;
+                          `;
+                          
+                          const okButton = document.createElement('button');
+                          okButton.textContent = 'OK';
+                          okButton.style.cssText = `
+                            background: #10b981;
+                            color: white;
+                            border: none;
+                            padding: 15px 40px;
+                            border-radius: 10px;
+                            font-size: 18px;
+                            cursor: pointer;
+                            font-weight: bold;
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+                          `;
+                          
+                          contentDiv.appendChild(title);
+                          contentDiv.appendChild(message);
+                          contentDiv.appendChild(okButton);
+                          popup.appendChild(contentDiv);
+                          document.body.appendChild(popup);
+                          
+                          okButton.onclick = () => {
+                            document.body.removeChild(popup);
+                          };
+                          
+                          // Auto close after 3 seconds
+                          setTimeout(() => {
+                            if (document.body.contains(popup)) {
+                              document.body.removeChild(popup);
+                            }
+                          }, 3000);
+                        };
+                        
+                        showSuccessPopup();
+                      }} className="bg-emerald-600 hover:bg-emerald-700">
+                        <Save className="w-4 h-4 mr-2" />
+                        Save Guidelines
+                      </Button>
+                      <Button onClick={() => {
+                        if (!isConnected) { 
+                          alert('Not connected to server. Please refresh and try again.');
+                          return;
+                        }
+                        clearAdminGuidelines(selectedScenario);
+                        setShapes([]);
+                        
+                        // Show success popup
+                        const showSuccessPopup = () => {
+                          const popup = document.createElement('div');
+                          popup.style.cssText = `
+                            position: fixed;
+                            top: 0;
+                            left: 0;
+                            width: 100vw;
+                            height: 100vh;
+                            background: rgba(0, 0, 0, 0.5);
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            z-index: 99999;
+                            font-family: Arial, sans-serif;
+                          `;
+                          
+                          const contentDiv = document.createElement('div');
+                          contentDiv.style.cssText = `
+                            background: white;
+                            padding: 40px;
+                            border-radius: 20px;
+                            text-align: center;
+                            max-width: 400px;
+                            width: 90%;
+                            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+                          `;
+                          
+                          const title = document.createElement('h2');
+                          title.textContent = '✅ Cleared!';
+                          title.style.cssText = `
+                            color: #10b981;
+                            margin-bottom: 20px;
+                            font-size: 28px;
+                            font-weight: bold;
+                          `;
+                          
+                          const message = document.createElement('p');
+                          message.textContent = `Guidelines cleared for "${selectedScenario}". You can now draw new guidelines.`;
+                          message.style.cssText = `
+                            color: #374151;
+                            margin-bottom: 30px;
+                            font-size: 18px;
+                            line-height: 1.5;
+                          `;
+                          
+                          const okButton = document.createElement('button');
+                          okButton.textContent = 'OK';
+                          okButton.style.cssText = `
+                            background: #10b981;
+                            color: white;
+                            border: none;
+                            padding: 15px 40px;
+                            border-radius: 10px;
+                            font-size: 18px;
+                            cursor: pointer;
+                            font-weight: bold;
+                            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+                          `;
+                          
+                          contentDiv.appendChild(title);
+                          contentDiv.appendChild(message);
+                          contentDiv.appendChild(okButton);
+                          popup.appendChild(contentDiv);
+                          document.body.appendChild(popup);
+                          
+                          okButton.onclick = () => {
+                            document.body.removeChild(popup);
+                          };
+                          
+                          // Auto close after 3 seconds
+                          setTimeout(() => {
+                            if (document.body.contains(popup)) {
+                              document.body.removeChild(popup);
+                            }
+                          }, 3000);
+                        };
+                        
+                        showSuccessPopup();
+                      }} variant="destructive" className="bg-red-600 hover:bg-red-700">
+                        <RotateCcw className="w-4 h-4 mr-2" />
+                        Clear Guidelines
+                      </Button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {/* Drawing Toolbar - Only show in guidelines mode */}
+                  {fieldMode === 'guidelines' && (
+                  <div className="flex items-center gap-3 mb-3">
+                    <span className="text-sm text-muted-foreground">Tool:</span>
+                    <Button size="sm" variant={tool==='arrow'?'default':'outline'} onClick={() => setTool('arrow')}>Arrow</Button>
+                    <Button size="sm" variant={tool==='dottedArrow'?'default':'outline'} onClick={() => setTool('dottedArrow')}>Dotted Arrow</Button>
+                    <Button size="sm" variant={tool==='line'?'default':'outline'} onClick={() => setTool('line')}>Line</Button>
+                    <span className="ml-4 text-sm text-muted-foreground">Color:</span>
+                    <button onClick={() => setStroke('#000000')} className={`w-6 h-6 rounded-full border ${stroke==='#000000'?'ring-2 ring-black':''}`} style={{background:'#000000'}} />
+                    <button onClick={() => setStroke('#ef4444')} className={`w-6 h-6 rounded-full border ${stroke==='#ef4444'?'ring-2 ring-black':''}`} style={{background:'#ef4444'}} />
+                    <button onClick={() => setStroke('#f59e0b')} className={`w-6 h-6 rounded-full border ${stroke==='#f59e0b'?'ring-2 ring-black':''}`} style={{background:'#f59e0b'}} />
+                  </div>
+                  )}
                   
                   {/* Baseball Field */}
                   <div className="bg-white rounded-lg shadow-sm p-6">
@@ -1133,7 +1499,7 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
                       id="admin-field"
                       className="relative w-full rounded-lg overflow-hidden"
                       style={{ 
-                        height: '600px',
+                        height: '750px',
                         backgroundImage: 'url(/images/Baseball_Field.png)',
                         backgroundSize: 'cover',
                         backgroundPosition: 'center',
@@ -1142,6 +1508,7 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
                       }}
                       onMouseMove={handleAdminMouseMove}
                       onMouseUp={handleAdminMouseUp}
+                      ref={fieldContainerRef}
                     >
                       {/* Players */}
                       {Object.entries(positions).map(([key, pos]) => (
@@ -1177,6 +1544,66 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
                           </div>
                         </div>
                       ))}
+                      {/* Guidelines Canvas - Only allow drawing in guidelines mode */}
+                      <Stage
+                        width={fieldContainerRef.current ? fieldContainerRef.current.clientWidth : 0}
+                        height={fieldContainerRef.current ? fieldContainerRef.current.clientHeight : 0}
+                        className="absolute inset-0"
+                        onMouseDown={(e) => {
+                          // Only allow drawing in guidelines mode
+                          if (fieldMode !== 'guidelines') return;
+                          // start drawing
+                          setIsDrawing(true);
+                          const container = fieldContainerRef.current;
+                          if (!container) return;
+                          const rect = container.getBoundingClientRect();
+                          const pos = e.evt;
+                          const x = ((pos.clientX - rect.left) / rect.width) * 100;
+                          const y = ((pos.clientY - rect.top) / rect.height) * 100;
+                          setTempPoints([x, y]);
+                        }}
+                        onMouseMove={(e) => {
+                          if (!isDrawing || fieldMode !== 'guidelines') return;
+                          const container = fieldContainerRef.current;
+                          if (!container) return;
+                          const rect = container.getBoundingClientRect();
+                          const pos = e.evt;
+                          const x = ((pos.clientX - rect.left) / rect.width) * 100;
+                          const y = ((pos.clientY - rect.top) / rect.height) * 100;
+                          setTempPoints((pts) => pts.length>=2 ? [pts[0], pts[1], x, y] : [x,y]);
+                        }}
+                        onMouseUp={() => {
+                          if (fieldMode !== 'guidelines') return;
+                          if (isDrawing && tempPoints.length >= 4) {
+                            const id = `${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+                            setShapes(prev => [...prev, { id, type: tool, points: tempPoints, stroke, strokeWidth: 3 }]);
+                          }
+                          setIsDrawing(false);
+                          setTempPoints([]);
+                        }}
+                      >
+                        <Layer>
+                          {/* Only show guidelines in guidelines mode */}
+                          {fieldMode === 'guidelines' && shapes.map(s => (
+                            s.type === 'arrow' ? (
+                              <KonvaArrow key={s.id} points={toPixels(s.points, fieldContainerRef)} stroke={s.stroke} fill={s.stroke} strokeWidth={s.strokeWidth || 3} pointerLength={12} pointerWidth={12} />
+                            ) : s.type === 'dottedArrow' ? (
+                              <KonvaArrow key={s.id} points={toPixels(s.points, fieldContainerRef)} stroke={s.stroke} fill={s.stroke} strokeWidth={s.strokeWidth || 3} pointerLength={12} pointerWidth={12} dash={[10, 5]} />
+                            ) : (
+                              <KonvaLine key={s.id} points={toPixels(s.points, fieldContainerRef)} stroke={s.stroke} strokeWidth={s.strokeWidth || 3} />
+                            )
+                          ))}
+                          {fieldMode === 'guidelines' && isDrawing && tempPoints.length>=4 && (
+                            tool === 'arrow' ? (
+                              <KonvaArrow points={toPixels(tempPoints, fieldContainerRef)} stroke={stroke} fill={stroke} strokeWidth={3} pointerLength={12} pointerWidth={12} />
+                            ) : tool === 'dottedArrow' ? (
+                              <KonvaArrow points={toPixels(tempPoints, fieldContainerRef)} stroke={stroke} fill={stroke} strokeWidth={3} pointerLength={12} pointerWidth={12} dash={[10, 5]} />
+                            ) : (
+                              <KonvaLine points={toPixels(tempPoints, fieldContainerRef)} stroke={stroke} strokeWidth={3} />
+                            )
+                          )}
+                        </Layer>
+                      </Stage>
                     </div>
                   </div>
                 </div>

@@ -8,6 +8,7 @@ export function SocketProvider({ children }) {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [adminPositions, setAdminPositions] = useState({});
+  const [adminGuidelines, setAdminGuidelines] = useState({});
   const { user, isAuthenticated } = useAuth();
 
   useEffect(() => {
@@ -90,6 +91,45 @@ export function SocketProvider({ children }) {
 
       setSocket(newSocket);
 
+      // Guidelines listeners
+      newSocket.on('guidelines:updated', (data) => {
+        setAdminGuidelines(prev => ({
+          ...prev,
+          [data.scenario]: {
+            shapes: data.shapes,
+            setBy: data.setBy,
+            timestamp: data.timestamp
+          }
+        }));
+      });
+
+      newSocket.on('guidelines:cleared', (data) => {
+        setAdminGuidelines(prev => {
+          const updated = { ...prev };
+          delete updated[data.scenario];
+          return updated;
+        });
+      });
+
+      newSocket.on('user:guidelinesReceived', (data) => {
+        setAdminGuidelines(prev => ({
+          ...prev,
+          [data.scenario]: {
+            shapes: data.shapes || [],
+            setBy: data.setBy,
+            timestamp: data.timestamp
+          }
+        }));
+      });
+
+      newSocket.on('admin:guidelinesError', (error) => {
+        console.error('Admin guidelines error:', error);
+      });
+
+      newSocket.on('user:guidelinesError', (error) => {
+        console.error('User guidelines error:', error);
+      });
+
       return () => {
         newSocket.close();
       };
@@ -131,10 +171,36 @@ export function SocketProvider({ children }) {
     }
   };
 
+  // Guidelines admin functions
+  const saveAdminGuidelines = (scenario, shapes) => {
+    if (socket && user?.role === 'admin') {
+      const adminId = user._id || user.id || user.userId || user.user_id;
+      socket.emit('admin:setGuidelines', { scenario, shapes, adminId });
+    }
+  };
+
+  const updateAdminGuidelines = (scenario, shapes) => {
+    if (socket && user?.role === 'admin') {
+      socket.emit('admin:updateGuidelines', { scenario, shapes, adminId: user.id });
+    }
+  };
+
+  const clearAdminGuidelines = (scenario) => {
+    if (socket && user?.role === 'admin') {
+      socket.emit('admin:clearGuidelines', { scenario });
+    }
+  };
+
   // User functions
   const requestUserPositions = (scenario) => {
     if (socket) {
       socket.emit('user:getPositions', { scenario });
+    }
+  };
+
+  const requestUserGuidelines = (scenario) => {
+    if (socket) {
+      socket.emit('user:getGuidelines', { scenario });
     }
   };
 
@@ -146,17 +212,27 @@ export function SocketProvider({ children }) {
     return adminPositions[scenario] && adminPositions[scenario].positions;
   };
 
+  const getGuidelines = (scenario) => adminGuidelines[scenario] || null;
+  const hasGuidelines = (scenario) => !!(adminGuidelines[scenario] && adminGuidelines[scenario].shapes && adminGuidelines[scenario].shapes.length > 0);
+
   return (
     <SocketContext.Provider value={{
       socket,
       isConnected,
       adminPositions,
+      adminGuidelines,
       saveAdminPositions,
       updateAdminPositions,
       clearAdminPositions,
+      saveAdminGuidelines,
+      updateAdminGuidelines,
+      clearAdminGuidelines,
       requestUserPositions,
+      requestUserGuidelines,
       getAdminPositions,
-      hasAdminPositions
+      hasAdminPositions,
+      getGuidelines,
+      hasGuidelines
     }}>
       {children}
     </SocketContext.Provider>

@@ -1,3 +1,5 @@
+
+
 import mongoose from 'mongoose';
 import User from './models/User.js';
 import dotenv from 'dotenv';
@@ -39,3 +41,10 @@ async function createAdminUser() {
 }
 
 createAdminUser();
+
+
+
+
+
+
+

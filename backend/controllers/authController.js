@@ -39,6 +39,7 @@ export const login = async (req, res) => {
     const refreshToken = generateRefreshToken(user._id);
 
     user.refreshToken = refreshToken;
+    user.lastLogin = new Date();
     await user.save();
 
     console.log('Login successful for user:', user.username);

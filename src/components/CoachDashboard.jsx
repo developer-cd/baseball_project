@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter, RefreshCw } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { PlayerActivityTable } from "./PlayerActivityTable";
@@ -7,20 +7,81 @@ import { PerformanceSummary } from "./PerformanceSummary";
 import { SuccessRateChart } from "./SuccessRateChart";
 import { LeaderboardWidget } from "./LeaderboardWidget";
 import { PlayerDetailModal } from "./PlayerDetailModal";
-import { mockPlayers, teamStats } from "../data/mockPlayerData";
+import axios from "../api/axios";
+import { useAuth } from "../context/AuthContext";
 
 export function CoachDashboard({ onBack }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [filterActive, setFilterActive] = useState(null);
   const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [players, setPlayers] = useState([]);
+  const [teamStats, setTeamStats] = useState({
+    totalPlayers: 0,
+    activePlayers: 0,
+    averageSuccessRate: 0,
+    totalSessions: 0,
+    totalAttempts: 0
+  });
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const { user } = useAuth();
 
-  // Filter players based on search and active status
-  const filteredPlayers = mockPlayers.filter((player) => {
+  // Fetch coach dashboard data
+  const fetchStats = async () => {
+    try {
+      const response = await axios.get('/coach-stats/stats');
+      if (response.data.success) {
+        setTeamStats(response.data.data);
+      }
+    } catch (error) {
+      console.error('Error fetching coach stats:', error);
+    }
+  };
+
+  const fetchPlayers = async () => {
+    try {
+      const filter = filterActive === true ? 'active' : filterActive === false ? 'inactive' : '';
+      const response = await axios.get(`/coach-stats/players?search=${searchQuery}&filter=${filter}`);
+      if (response.data.success) {
+        setPlayers(response.data.data.players);
+      }
+    } catch (error) {
+      console.error('Error fetching players:', error);
+    }
+  };
+
+  // Load data on mount
+  useEffect(() => {
+    const loadData = async () => {
+      setLoading(true);
+      await Promise.all([fetchStats(), fetchPlayers()]);
+      setLoading(false);
+    };
+    loadData();
+  }, []);
+
+  // Refresh players when search or filter changes (debounced)
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      fetchPlayers();
+    }, 300); // Debounce search by 300ms
+    
+    return () => clearTimeout(timeoutId);
+  }, [searchQuery, filterActive]);
+
+  // Refresh data
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    await Promise.all([fetchStats(), fetchPlayers()]);
+    setRefreshing(false);
+  };
+
+  // Filter players based on search and active status (client-side for instant filtering)
+  const filteredPlayers = players.filter((player) => {
     const matchesSearch = 
       player.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       player.email.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesFilter = filterActive === null || player.isActive === filterActive;
-    return matchesSearch && matchesFilter;
+    return matchesSearch;
   });
 
   return (
@@ -56,6 +117,16 @@ export function CoachDashboard({ onBack }) {
             </div>
 
             <div className="flex items-center gap-3">
+              <Button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                variant="outline"
+                size="sm"
+                className="flex items-center gap-2"
+              >
+                <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
               <div className="relative w-2 h-2">
                 <div className="absolute inset-0 w-2 h-2 rounded-full bg-green-500 animate-ping" />
               </div>
@@ -67,8 +138,15 @@ export function CoachDashboard({ onBack }) {
 
       {/* Main Content */}
       <main className="relative container mx-auto px-4 md:px-6 py-6 md:py-8">
-        {/* Performance Summary Cards */}
-        <PerformanceSummary stats={teamStats} />
+        {loading ? (
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-500 mx-auto"></div>
+            <p className="text-sm text-muted-foreground mt-4">Loading dashboard data...</p>
+          </div>
+        ) : (
+          <>
+            {/* Performance Summary Cards */}
+            <PerformanceSummary stats={teamStats} />
 
         {/* Charts and Analytics Row */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
@@ -80,7 +158,7 @@ export function CoachDashboard({ onBack }) {
           {/* Leaderboard */}
           <div className="lg:col-span-1">
             <LeaderboardWidget 
-              players={mockPlayers}
+              players={players}
               onViewPlayer={(player) => setSelectedPlayer(player)}
             />
           </div>
@@ -148,18 +226,32 @@ export function CoachDashboard({ onBack }) {
           </div>
 
           {/* Player Table */}
-          <PlayerActivityTable
-            players={filteredPlayers}
-            onViewPlayer={(player) => setSelectedPlayer(player)}
-          />
+          {loading ? (
+            <div className="text-center py-12">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-500 mx-auto"></div>
+              <p className="text-sm text-muted-foreground mt-4">Loading players...</p>
+            </div>
+          ) : (
+            <PlayerActivityTable
+              players={filteredPlayers}
+              onViewPlayer={(player) => setSelectedPlayer(player)}
+            />
+          )}
         </div>
+          </>
+        )}
       </main>
 
       {/* Player Detail Modal */}
       {selectedPlayer && (
         <PlayerDetailModal
           player={selectedPlayer}
-          onClose={() => setSelectedPlayer(null)}
+          onClose={() => {
+            setSelectedPlayer(null);
+            // Refresh player data when modal is closed
+            fetchPlayers();
+            fetchStats();
+          }}
         />
       )}
     </div>

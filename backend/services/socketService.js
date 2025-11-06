@@ -1,5 +1,6 @@
 import { Server } from 'socket.io';
 import FieldPosition from '../models/FieldPosition.js';
+import Guideline from '../models/Guideline.js';
 
 class SocketService {
   constructor() {
@@ -148,6 +149,79 @@ class SocketService {
         } catch (error) {
           console.error('Error clearing positions:', error);
           socket.emit('admin:positionsError', { error: error.message });
+        }
+      });
+
+      // ===== GUIDELINES =====
+      socket.on('admin:setGuidelines', async (data) => {
+        try {
+          const { scenario, shapes, adminId } = data;
+          console.log('[guidelines] admin:setGuidelines', {
+            scenario,
+            adminId,
+            shapesCount: Array.isArray(shapes) ? shapes.length : 0
+          });
+          if (!adminId) throw new Error('Admin ID is required');
+
+          await Guideline.updateMany({ scenario, isActive: true }, { isActive: false });
+          const guideline = new Guideline({ scenario, shapes, createdBy: adminId, isActive: true });
+          await guideline.save();
+
+          console.log('[guidelines] saved', { id: guideline._id.toString(), scenario });
+          this.io.emit('guidelines:updated', { scenario, shapes, setBy: 'admin', timestamp: new Date() });
+          socket.emit('admin:guidelinesSaved', { success: true, id: guideline._id });
+        } catch (error) {
+          console.error('Error saving guidelines:', error);
+          socket.emit('admin:guidelinesError', { error: error.message });
+        }
+      });
+
+      socket.on('admin:updateGuidelines', async (data) => {
+        try {
+          const { scenario, shapes, adminId } = data;
+          const existing = await Guideline.findOne({ scenario, isActive: true });
+          if (existing) {
+            existing.shapes = shapes;
+            existing.updatedAt = new Date();
+            await existing.save();
+          } else {
+            const guideline = new Guideline({ scenario, shapes, createdBy: adminId, isActive: true });
+            await guideline.save();
+          }
+          this.io.emit('guidelines:updated', { scenario, shapes, setBy: 'admin', timestamp: new Date() });
+          socket.emit('admin:guidelinesUpdated', { success: true });
+        } catch (error) {
+          console.error('Error updating guidelines:', error);
+          socket.emit('admin:guidelinesError', { error: error.message });
+        }
+      });
+
+      socket.on('user:getGuidelines', async (data) => {
+        try {
+          const { scenario } = data;
+          const guideline = await Guideline.findOne({ scenario, isActive: true });
+          console.log('[guidelines] user:getGuidelines', scenario, 'found:', !!guideline);
+          socket.emit('user:guidelinesReceived', {
+            scenario,
+            shapes: guideline ? guideline.shapes : [],
+            setBy: guideline ? 'admin' : 'none',
+            timestamp: guideline ? guideline.updatedAt : null
+          });
+        } catch (error) {
+          console.error('Error getting guidelines:', error);
+          socket.emit('user:guidelinesError', { error: error.message });
+        }
+      });
+
+      socket.on('admin:clearGuidelines', async (data) => {
+        try {
+          const { scenario } = data;
+          await Guideline.updateMany({ scenario, isActive: true }, { isActive: false });
+          this.io.emit('guidelines:cleared', { scenario, timestamp: new Date() });
+          socket.emit('admin:guidelinesCleared', { success: true });
+        } catch (error) {
+          console.error('Error clearing guidelines:', error);
+          socket.emit('admin:guidelinesError', { error: error.message });
         }
       });
 

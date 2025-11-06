@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown, Menu, RefreshCw } from 'lucide-react';
 import { useSocket } from '../context/SocketContext';
+import { Stage, Layer, Line as KonvaLine, Arrow as KonvaArrow } from 'react-konva';
 
 const FieldVisualizer = () => {
   const navigate = useNavigate();
@@ -9,7 +10,10 @@ const FieldVisualizer = () => {
     isConnected, 
     hasAdminPositions, 
     getAdminPositions, 
-    requestUserPositions 
+    requestUserPositions,
+    requestUserGuidelines,
+    getGuidelines,
+    hasGuidelines
   } = useSocket();
   // Base positions (starting positions)
   const basePositions = {
@@ -68,6 +72,7 @@ const FieldVisualizer = () => {
   const [attemptsUsed, setAttemptsUsed] = useState(0);
   const [gameOver, setGameOver] = useState(false);
   const [playerAttempts, setPlayerAttempts] = useState({}); // Track attempts per player
+  const [gameStarted, setGameStarted] = useState(false); // Game start state
 
   const [dragging, setDragging] = useState(null);
   const [totalMoves, setTotalMoves] = useState(9);
@@ -80,14 +85,75 @@ const FieldVisualizer = () => {
   const [lastRequestedScenario, setLastRequestedScenario] = useState(null);
   const [adminPositionsSet, setAdminPositionsSet] = useState(false);
   const [sidebarVisible, setSidebarVisible] = useState(true);
+  const fieldRef = useRef(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [guidelinesVisible, setGuidelinesVisible] = useState(false);
+  const [guidelineAnimation, setGuidelineAnimation] = useState(0); // 0 to 1 for animation progress
 
   // Check for admin positions when component mounts or scenario changes
   useEffect(() => {
     if (isConnected && selectedScenario && selectedScenario !== lastRequestedScenario) {
       setLastRequestedScenario(selectedScenario);
       requestUserPositions(selectedScenario);
+      requestUserGuidelines(selectedScenario);
     }
   }, [isConnected, selectedScenario]);
+
+  // Measure field size for Konva overlay
+  useEffect(() => {
+    const updateSize = () => {
+      const el = fieldRef.current;
+      if (!el) return;
+      const width = el.clientWidth || 0;
+      const height = el.clientHeight || 0;
+      setStageSize({ width, height });
+    };
+    updateSize();
+    window.addEventListener('resize', updateSize);
+    return () => window.removeEventListener('resize', updateSize);
+  }, [sidebarVisible]);
+
+  // Auto-hide guidelines after 4 seconds whenever they arrive/change
+  // Only show guidelines if game has started
+  const guidelineShapes = (getGuidelines(selectedScenario)?.shapes) || [];
+  useEffect(() => {
+    if (gameStarted && guidelineShapes.length > 0) {
+      setGuidelinesVisible(true);
+      setGuidelineAnimation(0); // Reset animation
+      // Animate guidelines in
+      const duration = 800; // 800ms animation
+      const startTime = Date.now();
+      const animate = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        setGuidelineAnimation(progress);
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        }
+      };
+      requestAnimationFrame(animate);
+      const t = setTimeout(() => {
+        // Fade out before hiding
+        const fadeOutStart = Date.now();
+        const fadeOutDuration = 300;
+        const fadeOut = () => {
+          const elapsed = Date.now() - fadeOutStart;
+          const progress = Math.min(elapsed / fadeOutDuration, 1);
+          setGuidelineAnimation(1 - progress);
+          if (progress < 1) {
+            requestAnimationFrame(fadeOut);
+          } else {
+            setGuidelinesVisible(false);
+          }
+        };
+        requestAnimationFrame(fadeOut);
+      }, 4000);
+      return () => clearTimeout(t);
+    } else {
+      setGuidelinesVisible(false);
+      setGuidelineAnimation(0);
+    }
+  }, [guidelineShapes.length, selectedScenario, gameStarted]);
 
   // Check if admin has set positions for current scenario
   useEffect(() => {
@@ -159,6 +225,8 @@ const FieldVisualizer = () => {
     setValidationResults({});
     setChancesLeft(3);
     setGameOver(false);
+    setGameStarted(false); // Reset game start state when scenario changes
+    setPlayerAttempts({}); // Reset player attempts
     
     // Update player positions based on scenario
     if (scenarioName === 'Base Positions') {
@@ -176,6 +244,8 @@ const FieldVisualizer = () => {
     setShowValidation(false);
     setChancesLeft(3);
     setGameOver(false);
+    setGameStarted(false); // Reset game start state
+    setPlayerAttempts({}); // Reset player attempts
   };
 
   // Real-time validation function
@@ -425,6 +495,7 @@ const FieldVisualizer = () => {
               setGameOver(false); // Reset game over
               setAdminPositionsSet(false); // Allow admin positions to be set again
               setPlayerAttempts({}); // Reset player attempts
+              setGameStarted(false); // Reset game start state
               
               // Show admin positions again
               if (hasAdminPositions(selectedScenario)) {
@@ -498,6 +569,7 @@ const FieldVisualizer = () => {
               setGameOver(false); // Reset game over
               setAdminPositionsSet(false); // Allow admin positions to be set again
               setPlayerAttempts({}); // Reset player attempts
+              setGameStarted(false); // Reset game start state
               
               if (hasAdminPositions(selectedScenario)) {
                 const adminData = getAdminPositions(selectedScenario);
@@ -565,6 +637,12 @@ const FieldVisualizer = () => {
   const handleMouseDown = (key, e) => {
     e.preventDefault();
     
+    // Check if game has started
+    if (!gameStarted) {
+      alert('⚠️ Please click "Start Game" button to begin positioning players!');
+      return;
+    }
+    
     // Check if player has reached max attempts (3)
     if (playerAttempts[key] >= 3) {
       alert(`❌ Player ${key} has reached maximum attempts (3). Cannot move this player anymore.`);
@@ -578,7 +656,7 @@ const FieldVisualizer = () => {
   };
 
   const handleMouseMove = (e) => {
-    if (dragging && !isAdminControlled) {
+    if (dragging && !isAdminControlled && gameStarted) {
       const field = document.getElementById('active-field');
       if (!field) return;
       const rect = field.getBoundingClientRect();
@@ -754,11 +832,11 @@ const FieldVisualizer = () => {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto p-6">
+      <div className={`mx-auto ${sidebarVisible ? 'max-w-7xl p-6' : 'max-w-none p-2'}`}>
         <div className={`grid gap-6 ${sidebarVisible ? 'grid-cols-12' : 'grid-cols-1'}`}>
           {/* Left Sidebar */}
           {sidebarVisible && (
-          <div className="col-span-4 space-y-4">
+          <div className="col-span-3 space-y-4">
             {/* Training Scenario Card */}
             <div className="bg-white rounded-lg shadow-sm p-5">
               <div className="flex items-center mb-4">
@@ -800,14 +878,7 @@ const FieldVisualizer = () => {
                         <button
                           key={scenario.name}
                           onClick={() => {
-                            setSelectedScenario(scenario.name);
-                            setDropdownOpen(false);
-                            // Reset attempts when changing scenario
-    setAttemptsUsed(0);
-    setChancesLeft(3);
-    setGameOver(false);
-    setAdminPositionsSet(false);
-    setPlayerAttempts({}); // Reset player attempts
+                            handleScenarioChange(scenario.name);
                           }}
                           className="flex items-center w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                         >
@@ -842,29 +913,6 @@ const FieldVisualizer = () => {
               </div>
             </div>
 
-            {/* Player Positions Card */}
-            <div className="bg-white rounded-lg shadow-sm p-5">
-              <div className="flex items-center mb-4">
-                <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center mr-3">
-                  <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
-                </div>
-                <h2 className="text-sm font-semibold text-gray-900">Player Positions</h2>
-              </div>
-
-              <div className="space-y-2">
-                {playersList.map((player) => (
-                  <div key={player.key} className="flex items-center py-1">
-                    <div className={`w-8 h-8 ${player.color} rounded-full flex items-center justify-center mr-3 flex-shrink-0`}>
-                      <span className="text-white text-xs font-semibold">{player.key}</span>
-                    </div>
-                    <span className="text-sm text-gray-700">{player.label}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
             {/* How to Play Card */}
             <div className="bg-white rounded-lg shadow-sm p-5">
               <h3 className="text-sm font-semibold text-gray-900 mb-4">How to Play</h3>
@@ -887,6 +935,29 @@ const FieldVisualizer = () => {
                   </div>
                   <span className="text-sm text-gray-600 pt-1">Watch video clips to learn strategies</span>
                 </div>
+              </div>
+            </div>
+
+            {/* Player Positions Card */}
+            <div className="bg-white rounded-lg shadow-sm p-5">
+              <div className="flex items-center mb-4">
+                <div className="w-10 h-10 bg-blue-500 rounded-full flex items-center justify-center mr-3">
+                  <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M13 10V3L4 14h7v7l9-11h-7z" />
+                  </svg>
+                </div>
+                <h2 className="text-sm font-semibold text-gray-900">Player Positions</h2>
+              </div>
+
+              <div className="space-y-2">
+                {playersList.map((player) => (
+                  <div key={player.key} className="flex items-center py-1">
+                    <div className={`w-8 h-8 ${player.color} rounded-full flex items-center justify-center mr-3 flex-shrink-0`}>
+                      <span className="text-white text-xs font-semibold">{player.key}</span>
+                    </div>
+                    <span className="text-sm text-gray-700">{player.label}</span>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -915,7 +986,7 @@ const FieldVisualizer = () => {
           )}
 
           {/* Main Field Area */}
-          <div className={sidebarVisible ? "col-span-8" : "col-span-1"}>
+          <div className={sidebarVisible ? "col-span-9" : "col-span-12"}>
             <div className="bg-emerald-50 rounded-lg p-4 mb-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center">
@@ -992,19 +1063,44 @@ const FieldVisualizer = () => {
               </div>
             </div>
 
+            {/* Start Game Button - Show before game starts */}
+            {!gameStarted && (
+              <div className="bg-white rounded-lg shadow-sm p-6 mb-4">
+                <div className="text-center">
+                  <div className="mb-4">
+                    <h3 className="text-xl font-bold text-gray-900 mb-2">Ready to Start?</h3>
+                    <p className="text-gray-600 mb-4">Click the button below to begin positioning players on the field.</p>
+                  </div>
+                  <button
+                    onClick={() => setGameStarted(true)}
+                    className="px-8 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transition-all transform hover:scale-105 flex items-center justify-center mx-auto gap-2"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Start Game
+                  </button>
+                  <p className="text-sm text-gray-500 mt-3">⚠️ Players are locked until you start the game</p>
+                </div>
+              </div>
+            )}
+
             {/* Baseball Field */}
-            <div className="bg-white rounded-lg shadow-sm p-6">
+            <div className={`bg-white rounded-lg shadow-sm ${sidebarVisible ? 'p-6' : 'p-2'} ${!gameStarted ? 'opacity-60' : ''}`}>
               <div 
                 id="active-field"
-                className="relative w-full rounded-lg overflow-hidden"
+                className={`relative rounded-lg overflow-hidden ${sidebarVisible ? 'w-full' : 'w-full max-w-none'} ${!gameStarted ? 'pointer-events-none' : ''}`}
                 style={{ 
-                  height: '600px',
+                  height: sidebarVisible ? '750px' : '950px',
+                  width: sidebarVisible ? '100%' : '100%',
                   backgroundImage: 'url(/images/Baseball_Field.png)',
-                  backgroundSize: 'cover',
+                  backgroundSize: sidebarVisible ? 'cover' : 'cover',
                   backgroundPosition: 'center',
                   backgroundRepeat: 'no-repeat',
-                  backgroundColor: '#22c55e'
+                  backgroundColor: '#ffffff'
                 }}
+                ref={fieldRef}
               >
 
                 {/* Players */}
@@ -1018,7 +1114,7 @@ const FieldVisualizer = () => {
                       key={key}
                       className={`absolute w-8 h-8 rounded-full flex items-center justify-center shadow-lg transition-transform select-none ${
                         dragging === key ? 'scale-110 shadow-2xl' : ''
-                      } ${isAdminControlled ? 'cursor-not-allowed opacity-75' : (playerAttempts[key] >= 3 ? 'cursor-not-allowed opacity-50' : 'cursor-move hover:scale-110')} ${showValidation ? (isCorrect ? 'ring-4 ring-green-500' : isIncorrect ? 'ring-4 ring-red-500' : '') : ''}`}
+                      } ${!gameStarted ? 'cursor-not-allowed opacity-50' : isAdminControlled ? 'cursor-not-allowed opacity-75' : (playerAttempts[key] >= 3 ? 'cursor-not-allowed opacity-50' : 'cursor-move hover:scale-110')} ${showValidation ? (isCorrect ? 'ring-4 ring-green-500' : isIncorrect ? 'ring-4 ring-red-500' : '') : ''}`}
                       style={{
                         left: `calc(${pos.x}% - 16px)`,
                         top: `calc(${pos.y}% - 16px)`,
@@ -1066,6 +1162,51 @@ const FieldVisualizer = () => {
                     </div>
                   );
                 })}
+                {/* Guidelines overlay with animation */}
+                <Stage
+                  width={stageSize.width}
+                  height={stageSize.height}
+                  className="absolute inset-0 pointer-events-none"
+                  style={{ opacity: guidelineAnimation }}
+                >
+                  <Layer>
+                    {gameStarted && guidelinesVisible && guidelineShapes.map((s, index) => {
+                      const points = toPixels(s.points, fieldRef);
+                      const opacity = guidelineAnimation;
+                      const delay = index * 50; // Stagger animation for each shape
+                      const delayedOpacity = guidelineAnimation > 0 ? Math.max(0, Math.min(1, (guidelineAnimation * 1000 - delay) / 500)) : 0;
+                      
+                      if (s.type === 'arrow') {
+                        return (
+                          <KonvaArrow 
+                            key={s.id} 
+                            points={points} 
+                            stroke={s.stroke} 
+                            fill={s.stroke} 
+                            strokeWidth={s.strokeWidth || 3} 
+                            pointerLength={12} 
+                            pointerWidth={12}
+                            opacity={delayedOpacity}
+                            shadowBlur={guidelineAnimation > 0.5 ? 5 : 0}
+                            shadowColor={s.stroke || '#10b981'}
+                          />
+                        );
+                      } else {
+                        return (
+                          <KonvaLine 
+                            key={s.id} 
+                            points={points} 
+                            stroke={s.stroke} 
+                            strokeWidth={s.strokeWidth || 3}
+                            opacity={delayedOpacity}
+                            shadowBlur={guidelineAnimation > 0.5 ? 5 : 0}
+                            shadowColor={s.stroke || '#10b981'}
+                          />
+                        );
+                      }
+                    })}
+                  </Layer>
+                </Stage>
               </div>
             </div>
           </div>
@@ -1074,5 +1215,19 @@ const FieldVisualizer = () => {
     </div>
   );
 };
+
+// helper within module scope
+function toPixels(percentPoints, ref) {
+  const el = ref.current;
+  if (!el || !percentPoints || percentPoints.length < 2) return [];
+  const w = el.clientWidth || 1;
+  const h = el.clientHeight || 1;
+  const out = [];
+  for (let i = 0; i < percentPoints.length; i += 2) {
+    out.push((percentPoints[i] / 100) * w);
+    out.push((percentPoints[i + 1] / 100) * h);
+  }
+  return out;
+}
 
 export default FieldVisualizer;

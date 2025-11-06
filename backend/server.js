@@ -7,6 +7,7 @@ import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import adminStatsRoutes from "./routes/adminStats.js";
+import coachStatsRoutes from "./routes/coachStats.js";
 import socketService from "./services/socketService.js";
 
 dotenv.config();
@@ -23,6 +24,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/user", userRoutes);
 app.use("/api/admin-stats", adminStatsRoutes);
+app.use("/api/coach-stats", coachStatsRoutes);
 
 // Initialize WebSocket
 socketService.initialize(server);

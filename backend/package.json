@@ -17,8 +17,10 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "jsonwebtoken": "^9.0.2",
+    "konva": "^10.0.8",
     "mongoose": "^8.18.2",
     "react-draggable": "^4.5.0",
+    "react-konva": "^19.2.0",
     "recharts": "^3.2.1",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1"
