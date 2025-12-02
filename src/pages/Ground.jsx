@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronDown, Menu, RefreshCw } from 'lucide-react';
 import { useSocket } from '../context/SocketContext';
-import { Stage, Layer, Line as KonvaLine, Arrow as KonvaArrow } from 'react-konva';
+import { Stage, Layer, Line as KonvaLine, Arrow as KonvaArrow, Circle } from 'react-konva';
+import axios from '../api/axios';
 
 const FieldVisualizer = () => {
   const navigate = useNavigate();
@@ -73,6 +74,13 @@ const FieldVisualizer = () => {
   const [gameOver, setGameOver] = useState(false);
   const [playerAttempts, setPlayerAttempts] = useState({}); // Track attempts per player
   const [gameStarted, setGameStarted] = useState(false); // Game start state
+  
+  // Session stats tracking
+  const [sessionStats, setSessionStats] = useState({
+    correct: 0,
+    total: 0,
+    score: 0
+  });
 
   const [dragging, setDragging] = useState(null);
   const [totalMoves, setTotalMoves] = useState(9);
@@ -80,6 +88,8 @@ const FieldVisualizer = () => {
   const [selectedScenario, setSelectedScenario] = useState('Base Positions');
   const [showBrowseModal, setShowBrowseModal] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [scenarios, setScenarios] = useState([]);
+  const [loadingScenarios, setLoadingScenarios] = useState(true);
   const [isAdminControlled, setIsAdminControlled] = useState(false);
   const [adminNotification, setAdminNotification] = useState(null);
   const [lastRequestedScenario, setLastRequestedScenario] = useState(null);
@@ -88,7 +98,49 @@ const FieldVisualizer = () => {
   const fieldRef = useRef(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [guidelinesVisible, setGuidelinesVisible] = useState(false);
+  const [correctPositions, setCorrectPositions] = useState(null); // Store correct positions for validation
   const [guidelineAnimation, setGuidelineAnimation] = useState(0); // 0 to 1 for animation progress
+  const [initialShowComplete, setInitialShowComplete] = useState(false); // Track if initial show is done
+  const [sequentialMode, setSequentialMode] = useState(false); // Sequential mode after initial show
+  const [currentSequentialIndex, setCurrentSequentialIndex] = useState(0); // Current guideline index in sequential mode
+  const [previousPositions, setPreviousPositions] = useState(null); // Track previous positions to detect player movement
+  const [waitingForPlayerMove, setWaitingForPlayerMove] = useState(false); // Track if we're waiting for player to move before showing next guideline
+  const [dragStartPosition, setDragStartPosition] = useState(null); // Track position when drag starts
+
+  // Fetch correct positions for validation
+  useEffect(() => {
+    const fetchCorrectPositions = async () => {
+      if (selectedScenario) {
+        try {
+          const response = await axios.get(`/user/correct-positions/${encodeURIComponent(selectedScenario)}`);
+          if (response.data.success && response.data.hasCorrectPositions) {
+            // Convert Map to object
+            const positionsObj = {};
+            if (response.data.positions) {
+              Object.keys(response.data.positions).forEach(key => {
+                const pos = response.data.positions[key];
+                if (pos && typeof pos.x === 'number' && typeof pos.y === 'number') {
+                  positionsObj[key] = {
+                    x: pos.x,
+                    y: pos.y,
+                    color: pos.color || 'bg-gray-500',
+                    label: pos.label || key
+                  };
+                }
+              });
+            }
+            setCorrectPositions(positionsObj);
+          } else {
+            setCorrectPositions(null);
+          }
+        } catch (error) {
+          console.error('Error fetching correct positions:', error);
+          setCorrectPositions(null);
+        }
+      }
+    };
+    fetchCorrectPositions();
+  }, [selectedScenario]);
 
   // Check for admin positions when component mounts or scenario changes
   useEffect(() => {
@@ -96,6 +148,15 @@ const FieldVisualizer = () => {
       setLastRequestedScenario(selectedScenario);
       requestUserPositions(selectedScenario);
       requestUserGuidelines(selectedScenario);
+      // Reset guidelines state when scenario changes
+      setInitialShowComplete(false);
+      setSequentialMode(false);
+      setCurrentSequentialIndex(0);
+      setGuidelinesVisible(false);
+      setGuidelineAnimation(0);
+      setPreviousPositions(null);
+      setWaitingForPlayerMove(false);
+      setDragStartPosition(null);
     }
   }, [isConnected, selectedScenario]);
 
@@ -116,10 +177,27 @@ const FieldVisualizer = () => {
   // Auto-hide guidelines after 4 seconds whenever they arrive/change
   // Only show guidelines if game has started
   const guidelineShapes = (getGuidelines(selectedScenario)?.shapes) || [];
+  
+  // Filter only black guidelines for sequential mode (memoized)
+  const blackGuidelines = useMemo(() => {
+    return guidelineShapes.filter(g => {
+      const stroke = g.stroke || '#000000';
+      // Check if color is black (can be #000000, #000, black, or rgb(0,0,0))
+      return stroke.toLowerCase() === '#000000' || 
+             stroke.toLowerCase() === '#000' || 
+             stroke.toLowerCase() === 'black' ||
+             stroke === 'rgb(0, 0, 0)';
+    });
+  }, [guidelineShapes]);
+  
+  // Initial show: All guidelines at once, then hide after 4 seconds
   useEffect(() => {
-    if (gameStarted && guidelineShapes.length > 0) {
+    if (gameStarted && guidelineShapes.length > 0 && !initialShowComplete) {
       setGuidelinesVisible(true);
+      setSequentialMode(false);
+      setCurrentSequentialIndex(0);
       setGuidelineAnimation(0); // Reset animation
+      
       // Animate guidelines in
       const duration = 800; // 800ms animation
       const startTime = Date.now();
@@ -132,6 +210,8 @@ const FieldVisualizer = () => {
         }
       };
       requestAnimationFrame(animate);
+      
+      // Hide after 4 seconds and start sequential mode
       const t = setTimeout(() => {
         // Fade out before hiding
         const fadeOutStart = Date.now();
@@ -144,16 +224,117 @@ const FieldVisualizer = () => {
             requestAnimationFrame(fadeOut);
           } else {
             setGuidelinesVisible(false);
+            setInitialShowComplete(true);
+            console.log('Starting sequential mode - black guidelines count:', blackGuidelines.length);
+            setSequentialMode(true);
+            setCurrentSequentialIndex(0); // Start with first guideline
           }
         };
         requestAnimationFrame(fadeOut);
       }, 4000);
       return () => clearTimeout(t);
-    } else {
+    } else if (!gameStarted) {
+      // Reset when game stops
       setGuidelinesVisible(false);
       setGuidelineAnimation(0);
+      setInitialShowComplete(false);
+      setSequentialMode(false);
+      setCurrentSequentialIndex(0);
+      setPreviousPositions(null);
+      setWaitingForPlayerMove(false);
+      setDragStartPosition(null);
     }
-  }, [guidelineShapes.length, selectedScenario, gameStarted]);
+  }, [guidelineShapes.length, selectedScenario, gameStarted, initialShowComplete]);
+
+  // Sequential mode: Show guidelines one by one (ONLY BLACK GUIDELINES)
+  // Show first guideline immediately, then wait for player movement before showing next
+  useEffect(() => {
+    // In sequential mode, only show black guidelines
+    if (sequentialMode && gameStarted && blackGuidelines.length > 0 && currentSequentialIndex < blackGuidelines.length) {
+      const currentGuideline = blackGuidelines[currentSequentialIndex];
+      
+      console.log('Sequential mode active:', {
+        sequentialMode,
+        gameStarted,
+        blackGuidelinesCount: blackGuidelines.length,
+        currentIndex: currentSequentialIndex,
+        currentGuideline: currentGuideline?.id,
+        waitingForPlayerMove
+      });
+      
+      // Show current guideline
+      setGuidelinesVisible(true);
+      setGuidelineAnimation(0);
+      setWaitingForPlayerMove(true); // Wait for player to move before showing next
+      
+      // Animate in
+      const duration = 600;
+      const startTime = Date.now();
+      const animate = () => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        setGuidelineAnimation(progress);
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        }
+      };
+      requestAnimationFrame(animate);
+    } else if (sequentialMode && blackGuidelines.length === 0) {
+      // No black guidelines, hide
+      console.log('Sequential mode but no black guidelines found');
+      setGuidelinesVisible(false);
+    } else if (sequentialMode) {
+      console.log('Sequential mode conditions not met:', {
+        sequentialMode,
+        gameStarted,
+        blackGuidelinesLength: blackGuidelines.length,
+        currentSequentialIndex,
+        required: blackGuidelines.length
+      });
+    }
+  }, [sequentialMode, currentSequentialIndex, blackGuidelines, gameStarted, waitingForPlayerMove]);
+
+  // Capture positions snapshot when showing a new guideline in sequential mode
+  useEffect(() => {
+    if (sequentialMode && gameStarted && currentSequentialIndex < blackGuidelines.length) {
+      // Capture current positions as baseline for detecting movement
+      // Use a small delay to ensure positions are stable
+      const timer = setTimeout(() => {
+        setPreviousPositions({ ...positions });
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [currentSequentialIndex, sequentialMode, gameStarted, blackGuidelines.length, positions]);
+
+  // Function to advance to next guideline after player movement
+  const advanceToNextGuideline = () => {
+    if (!sequentialMode || !waitingForPlayerMove || !gameStarted) return;
+    
+    // Fade out current guideline
+    const fadeOutStart = Date.now();
+    const fadeOutDuration = 300;
+    const fadeOut = () => {
+      const elapsed = Date.now() - fadeOutStart;
+      const progress = Math.min(elapsed / fadeOutDuration, 1);
+      setGuidelineAnimation(1 - progress);
+      if (progress < 1) {
+        requestAnimationFrame(fadeOut);
+      } else {
+        // Move to next black guideline
+        if (currentSequentialIndex < blackGuidelines.length - 1) {
+          setCurrentSequentialIndex(currentSequentialIndex + 1);
+          setWaitingForPlayerMove(false); // Reset waiting state
+          setPreviousPositions({ ...positions }); // Update previous positions
+        } else {
+          // All black guidelines shown, restart from beginning
+          setCurrentSequentialIndex(0);
+          setWaitingForPlayerMove(false);
+          setPreviousPositions({ ...positions });
+        }
+      }
+    };
+    requestAnimationFrame(fadeOut);
+  };
 
   // Check if admin has set positions for current scenario
   useEffect(() => {
@@ -177,39 +358,56 @@ const FieldVisualizer = () => {
     }
   }, [selectedScenario, hasAdminPositions, getAdminPositions, adminPositionsSet]);
 
-  const scenarios = [
-    { 
-      name: 'Base Positions', 
-      description: 'Starting defensive positions',
-      icon: '🏟️'
-    },
-    { 
-      name: 'Fly ball to LF', 
-      description: 'Fly ball to left field with no runners on base',
-      icon: '⚾',
-      active: true
-    },
-    { 
-      name: 'Ground ball to SS', 
-      description: 'Ground ball to shortstop positioning',
-      icon: '⚾'
-    },
-    { 
-      name: 'Bunt Defense', 
-      description: 'Defensive positioning for expected bunt',
-      icon: '⚾'
-    },
-    { 
-      name: 'Runner on 1st', 
-      description: 'Defensive shift with runner on first base',
-      icon: '🏃'
-    },
-    { 
-      name: 'Double Play Setup', 
-      description: 'Positioning for potential double play situations',
-      icon: '🔄'
-    }
-  ];
+  // Fetch scenarios from API
+  useEffect(() => {
+    const fetchScenarios = async () => {
+      setLoadingScenarios(true);
+      try {
+        const response = await axios.get('/user/scenarios');
+        console.log('Scenarios API response:', response.data);
+        console.log('Response status:', response.status);
+        
+        if (response.data && response.data.success) {
+          const fetchedScenarios = response.data.scenarios || [];
+          console.log('Fetched scenarios count:', fetchedScenarios.length);
+          console.log('Fetched scenarios:', fetchedScenarios);
+          
+          if (fetchedScenarios.length > 0) {
+            setScenarios(fetchedScenarios);
+            // Set first scenario as selected if current selected scenario not found
+            const foundScenario = fetchedScenarios.find(s => s.name === selectedScenario);
+            if (!foundScenario) {
+              console.log('Selected scenario not found, setting to first:', fetchedScenarios[0].name);
+              setSelectedScenario(fetchedScenarios[0].name);
+            } else {
+              console.log('Selected scenario found:', selectedScenario);
+            }
+          } else {
+            console.log('No scenarios found in database, using default');
+            setScenarios([
+              { name: 'Base Positions', description: 'Starting defensive positions', icon: '🏟️' }
+            ]);
+          }
+        } else {
+          console.error('API response not successful:', response.data);
+          // Fallback to default
+          setScenarios([
+            { name: 'Base Positions', description: 'Starting defensive positions', icon: '🏟️' }
+          ]);
+        }
+      } catch (error) {
+        console.error('Error fetching scenarios:', error);
+        console.error('Error details:', error.response?.data || error.message);
+        // Fallback to default scenarios if API fails
+        setScenarios([
+          { name: 'Base Positions', description: 'Starting defensive positions', icon: '🏟️' }
+        ]);
+      } finally {
+        setLoadingScenarios(false);
+      }
+    };
+    fetchScenarios();
+  }, []);
 
   const filteredScenarios = scenarios.filter(scenario =>
     scenario.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -227,32 +425,62 @@ const FieldVisualizer = () => {
     setGameOver(false);
     setGameStarted(false); // Reset game start state when scenario changes
     setPlayerAttempts({}); // Reset player attempts
+    // Reset session stats
+    setSessionStats({ correct: 0, total: 0, score: 0 });
     
     // Update player positions based on scenario
     if (scenarioName === 'Base Positions') {
       setPositions(basePositions);
     } else if (scenarioPositions[scenarioName]) {
+      // Use hardcoded positions if available
       setPositions(scenarioPositions[scenarioName]);
+    } else {
+      // For new scenarios, use base positions as default
+      setPositions(basePositions);
+    }
+    
+    // Request admin positions and guidelines for new scenario
+    if (isConnected) {
+      requestUserPositions(scenarioName);
+      requestUserGuidelines(scenarioName);
     }
   };
 
-  // Function to reset to base positions
+  // Function to reset to base positions for current scenario
   const resetPositions = () => {
-    setPositions(basePositions);
-    setSelectedScenario('Base Positions');
+    // Reset to base positions for current scenario, don't change scenario
+    if (selectedScenario === 'Base Positions') {
+      setPositions(basePositions);
+    } else if (scenarioPositions[selectedScenario]) {
+      // Use hardcoded positions if available
+      setPositions(scenarioPositions[selectedScenario]);
+    } else {
+      // For new scenarios, use base positions as default
+      setPositions(basePositions);
+    }
+    
+    // Don't change scenario, just reset positions and game state
     setValidationResults({});
     setShowValidation(false);
     setChancesLeft(3);
     setGameOver(false);
     setGameStarted(false); // Reset game start state
     setPlayerAttempts({}); // Reset player attempts
+    // Reset session stats
+    setSessionStats({ correct: 0, total: 0, score: 0 });
+    
+    // Request admin positions for current scenario if available
+    if (isConnected) {
+      requestUserPositions(selectedScenario);
+    }
   };
 
   // Real-time validation function
   const validatePlayerPosition = (playerKey, newPosition) => {
     console.log('Validating player:', playerKey, 'at position:', newPosition);
-    const correctPositions = scenarioPositions[selectedScenario] || basePositions;
-    const correctPos = correctPositions[playerKey];
+    // Use admin-set correct positions if available, otherwise use hardcoded positions
+    const correctPositionsForValidation = correctPositions || scenarioPositions[selectedScenario] || basePositions;
+    const correctPos = correctPositionsForValidation[playerKey];
     
     console.log('Correct position for', playerKey, ':', correctPos);
     
@@ -267,6 +495,7 @@ const FieldVisualizer = () => {
       console.log('Distance:', distance, 'Is correct:', isCorrect);
       
       setValidationResults(prev => {
+        const wasAlreadyCorrect = prev[playerKey]?.isCorrect;
         const newResults = {
           ...prev,
           [playerKey]: {
@@ -277,9 +506,27 @@ const FieldVisualizer = () => {
           }
         };
         
+        // Update session stats when player position is validated
+        if (isCorrect && !wasAlreadyCorrect) {
+          // Only count if this is a new correct validation (not already correct)
+          setSessionStats(prevStats => {
+            const newCorrect = prevStats.correct + 1;
+            const newTotal = prevStats.total + 1;
+            const newScore = newTotal > 0 ? Math.round((newCorrect / newTotal) * 100) : 0;
+            return { correct: newCorrect, total: newTotal, score: newScore };
+          });
+        } else if (!isCorrect && !wasAlreadyCorrect) {
+          // Count incorrect attempts (only if wasn't already validated)
+          setSessionStats(prevStats => {
+            const newTotal = prevStats.total + 1;
+            const newScore = newTotal > 0 ? Math.round((prevStats.correct / newTotal) * 100) : 0;
+            return { ...prevStats, total: newTotal, score: newScore };
+          });
+        }
+        
         // Check if all positions are correct
         setTimeout(() => {
-          const allCorrect = Object.keys(correctPositions).every(key => 
+          const allCorrect = Object.keys(correctPositionsForValidation).every(key =>
             newResults[key] && newResults[key].isCorrect
           );
           
@@ -553,7 +800,8 @@ const FieldVisualizer = () => {
           console.log('🎯 GAME OVER TRIGGERED! 3 players with max attempts:', playersWithMaxAttempts);
           console.log('Current player just reached 3 attempts:', playerKey, 'Total attempts:', updatedPlayerAttempts[playerKey]);
           setTimeout(() => {
-            const allCorrect = Object.keys(correctPositions).every(key => 
+            const correctPositionsForCheck = correctPositions || scenarioPositions[selectedScenario] || basePositions;
+            const allCorrect = Object.keys(correctPositionsForCheck).every(key => 
               validationResults[key] && validationResults[key].isCorrect
             );
             
@@ -589,14 +837,16 @@ const FieldVisualizer = () => {
 
   // Function to validate player positions
   const validatePositions = () => {
-    const correctPositions = scenarioPositions[selectedScenario] || basePositions;
+    // Use admin-set correct positions if available, otherwise use hardcoded positions
+    const correctPositionsForValidation = correctPositions || scenarioPositions[selectedScenario] || basePositions;
     const results = {};
     let correctCount = 0;
     let totalCount = 0;
+    const previousResults = validationResults;
 
     Object.keys(positions).forEach(player => {
       const currentPos = positions[player];
-      const correctPos = correctPositions[player];
+      const correctPos = correctPositionsForValidation[player];
       
       if (correctPos) {
         // Check if player is within acceptable range (within 8% of correct position)
@@ -616,6 +866,30 @@ const FieldVisualizer = () => {
         if (isCorrect) correctCount++;
         totalCount++;
       }
+    });
+    
+    // Update session stats after validation (only count new validations)
+    setSessionStats(prev => {
+      // Count only newly correct positions (not already correct)
+      let newCorrectCount = 0;
+      let newTotalCount = 0;
+      
+      Object.keys(results).forEach(player => {
+        const wasAlreadyCorrect = previousResults[player]?.isCorrect;
+        const isNowCorrect = results[player]?.isCorrect;
+        
+        if (isNowCorrect && !wasAlreadyCorrect) {
+          newCorrectCount++;
+          newTotalCount++;
+        } else if (!wasAlreadyCorrect) {
+          newTotalCount++;
+        }
+      });
+      
+      const newCorrect = prev.correct + newCorrectCount;
+      const newTotal = prev.total + newTotalCount;
+      const newScore = newTotal > 0 ? Math.round((newCorrect / newTotal) * 100) : 0;
+      return { correct: newCorrect, total: newTotal, score: newScore };
     });
 
     setValidationResults(results);
@@ -651,7 +925,11 @@ const FieldVisualizer = () => {
     
     // User can only drag if not admin controlled
     if (!isAdminControlled) {
-    setDragging(key);
+      setDragging(key);
+      // Store the starting position when drag begins
+      if (positions[key]) {
+        setDragStartPosition({ ...positions[key] });
+      }
     }
   };
 
@@ -676,10 +954,28 @@ const FieldVisualizer = () => {
 
   const handleMouseUp = () => {
     if (dragging && !isAdminControlled) {
+      // Check if player actually moved (significant movement)
+      if (dragStartPosition && positions[dragging]) {
+        const startPos = dragStartPosition;
+        const endPos = positions[dragging];
+        const distance = Math.sqrt(
+          Math.pow(endPos.x - startPos.x, 2) + Math.pow(endPos.y - startPos.y, 2)
+        );
+        
+        // If player moved more than 2% (significant movement)
+        if (distance > 2) {
+          console.log(`Player ${dragging} moved. Distance: ${distance.toFixed(2)}%`);
+          
+          // Advance to next guideline in sequential mode
+          advanceToNextGuideline();
+        }
+      }
+      
       // Validate the position when player is dropped
       validatePlayerPosition(dragging, positions[dragging]);
     }
     setDragging(null);
+    setDragStartPosition(null);
   };
 
 
@@ -744,47 +1040,50 @@ const FieldVisualizer = () => {
 
             {/* Scenarios List */}
             <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
-              {filteredScenarios.map((scenario) => (
-                <div
-                  key={scenario.name}
-                  onClick={() => {
-                    handleScenarioChange(scenario.name);
-                    setShowBrowseModal(false);
-                  }}
-                  className={`relative p-4 rounded-lg cursor-pointer transition-all ${
-                    scenario.active 
-                      ? 'bg-emerald-600 text-white' 
-                      : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start flex-1">
-                      <div className={`w-10 h-10 ${scenario.active ? 'bg-emerald-500' : 'bg-gray-500'} rounded-full flex items-center justify-center mr-3 flex-shrink-0`}>
-                        <svg className="w-6 h-6 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <circle cx="12" cy="12" r="3"/>
-                          <path d="M12 1v6m0 6v6m6-12h-6m0 6H6"/>
+              {loadingScenarios ? (
+                <div className="text-center text-gray-400 py-4">Loading scenarios...</div>
+              ) : filteredScenarios.length === 0 ? (
+                <div className="text-center text-gray-400 py-4">No scenarios found</div>
+              ) : (
+                filteredScenarios.map((scenario) => (
+                  <div
+                    key={scenario._id || scenario.name}
+                    onClick={() => {
+                      handleScenarioChange(scenario.name);
+                      setShowBrowseModal(false);
+                    }}
+                    className={`relative p-4 rounded-lg cursor-pointer transition-all ${
+                      scenario.name === selectedScenario
+                        ? 'bg-emerald-600 text-white' 
+                        : 'bg-gray-600 text-gray-200 hover:bg-gray-500'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex items-start flex-1">
+                        <div className={`w-10 h-10 ${scenario.name === selectedScenario ? 'bg-emerald-500' : 'bg-gray-500'} rounded-full flex items-center justify-center mr-3 flex-shrink-0 text-lg`}>
+                          {scenario.icon || '⚾'}
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="font-semibold text-sm mb-1">{scenario.name}</h3>
+                          <p className={`text-xs ${scenario.name === selectedScenario ? 'text-emerald-100' : 'text-gray-400'}`}>
+                            {scenario.description || 'No description'}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex items-center ml-3">
+                        {scenario.name === selectedScenario && (
+                          <span className="px-2 py-1 bg-emerald-500 text-white text-xs font-semibold rounded">
+                            Active
+                          </span>
+                        )}
+                        <svg className={`w-5 h-5 ml-2 ${scenario.name === selectedScenario ? 'text-white' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                         </svg>
                       </div>
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-sm mb-1">{scenario.name}</h3>
-                        <p className={`text-xs ${scenario.active ? 'text-emerald-100' : 'text-gray-400'}`}>
-                          {scenario.description}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center ml-3">
-                      {scenario.active && (
-                        <span className="px-2 py-1 bg-emerald-500 text-white text-xs font-semibold rounded">
-                          Active
-                        </span>
-                      )}
-                      <svg className={`w-5 h-5 ml-2 ${scenario.active ? 'text-white' : 'text-gray-400'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                      </svg>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -874,23 +1173,33 @@ const FieldVisualizer = () => {
 
                   {dropdownOpen && (
                     <div className="mt-1 bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden">
-                      {scenarios.map((scenario) => (
-                        <button
-                          key={scenario.name}
-                          onClick={() => {
-                            handleScenarioChange(scenario.name);
-                          }}
-                          className="flex items-center w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                        >
-                          <span className="w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>
-                          {scenario.name}
-                          {scenario.name === selectedScenario && (
-                            <svg className="w-4 h-4 ml-auto text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                            </svg>
-                          )}
-                        </button>
-                      ))}
+                      {loadingScenarios ? (
+                        <div className="px-3 py-2 text-sm text-gray-500 text-center">Loading scenarios...</div>
+                      ) : scenarios.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-gray-500 text-center">No scenarios available</div>
+                      ) : (
+                        (() => {
+                          console.log('Rendering scenarios in dropdown:', scenarios);
+                          return scenarios.map((scenario) => (
+                          <button
+                            key={scenario._id || scenario.name}
+                            onClick={() => {
+                              handleScenarioChange(scenario.name);
+                            }}
+                            className="flex items-center w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                          >
+                            <span className="mr-2">{scenario.icon || '⚾'}</span>
+                            <span className="w-2 h-2 bg-emerald-500 rounded-full mr-2"></span>
+                            {scenario.name}
+                            {scenario.name === selectedScenario && (
+                              <svg className="w-4 h-4 ml-auto text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                          </button>
+                          ));
+                        })()
+                      )}
                     </div>
                   )}
                 </div>
@@ -969,15 +1278,15 @@ const FieldVisualizer = () => {
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div className="text-center">
-                  <div className="text-2xl font-bold text-emerald-600">0</div>
+                  <div className="text-2xl font-bold text-emerald-600">{sessionStats.correct}</div>
                   <div className="text-xs text-gray-500 mt-1">Correct</div>
                 </div>
                 <div className="text-center">
-                  <div className="text-2xl font-bold text-blue-600">{totalMoves}</div>
+                  <div className="text-2xl font-bold text-blue-600">{sessionStats.total}</div>
                   <div className="text-xs text-gray-500 mt-1">Total</div>
                 </div>
                 <div className="text-center">
-                  <div className="text-2xl font-bold text-purple-600">0%</div>
+                  <div className="text-2xl font-bold text-purple-600">{sessionStats.score}%</div>
                   <div className="text-xs text-gray-500 mt-1">Score</div>
                 </div>
               </div>
@@ -1090,12 +1399,13 @@ const FieldVisualizer = () => {
             <div className={`bg-white rounded-lg shadow-sm ${sidebarVisible ? 'p-6' : 'p-2'} ${!gameStarted ? 'opacity-60' : ''}`}>
               <div 
                 id="active-field"
-                className={`relative rounded-lg overflow-hidden ${sidebarVisible ? 'w-full' : 'w-full max-w-none'} ${!gameStarted ? 'pointer-events-none' : ''}`}
+                className={`relative rounded-lg overflow-hidden mx-auto ${!gameStarted ? 'pointer-events-none' : ''}`}
                 style={{ 
-                  height: sidebarVisible ? '750px' : '950px',
-                  width: sidebarVisible ? '100%' : '100%',
+                  height: '750px',
+                  width: '1000px',
+                  maxWidth: '100%',
                   backgroundImage: 'url(/images/Baseball_Field.png)',
-                  backgroundSize: sidebarVisible ? 'cover' : 'cover',
+                  backgroundSize: 'cover',
                   backgroundPosition: 'center',
                   backgroundRepeat: 'no-repeat',
                   backgroundColor: '#ffffff'
@@ -1167,12 +1477,91 @@ const FieldVisualizer = () => {
                   width={stageSize.width}
                   height={stageSize.height}
                   className="absolute inset-0 pointer-events-none"
-                  style={{ opacity: guidelineAnimation }}
+                  style={{ opacity: sequentialMode ? 1 : guidelineAnimation }}
                 >
                   <Layer>
                     {gameStarted && guidelinesVisible && guidelineShapes.map((s, index) => {
                       const points = toPixels(s.points, fieldRef);
-                      const opacity = guidelineAnimation;
+                      
+                      // In sequential mode, only show current BLACK guideline
+                      if (sequentialMode) {
+                        // Check if this is the current black guideline we want to show
+                        if (currentSequentialIndex >= blackGuidelines.length) {
+                          return null;
+                        }
+                        const currentBlackGuideline = blackGuidelines[currentSequentialIndex];
+                        if (!currentBlackGuideline || currentBlackGuideline.id !== s.id) {
+                          return null; // Don't render other guidelines
+                        }
+                        // Show only current black guideline with animation
+                        const strokeColor = s.stroke || '#000000';
+                        if (s.type === 'arrow') {
+                          // Get arrow end point for circle (last 2 points are x, y)
+                          const endX = points[points.length - 2];
+                          const endY = points[points.length - 1];
+                          
+                          // Calculate direction vector to move circle forward from arrow end
+                          let circleX = endX;
+                          let circleY = endY;
+                          if (points.length >= 4) {
+                            // Get second last point to calculate direction
+                            const prevX = points[points.length - 4];
+                            const prevY = points[points.length - 3];
+                            // Calculate direction vector
+                            const dx = endX - prevX;
+                            const dy = endY - prevY;
+                            // Normalize and move circle forward by 20 pixels
+                            const length = Math.sqrt(dx * dx + dy * dy);
+                            if (length > 0) {
+                              const offset = 20; // Distance to move circle forward
+                              circleX = endX + (dx / length) * offset;
+                              circleY = endY + (dy / length) * offset;
+                            }
+                          }
+                          
+                          return (
+                            <React.Fragment key={s.id}>
+                              <KonvaArrow 
+                                points={points} 
+                                stroke={strokeColor} 
+                                fill={strokeColor} 
+                                strokeWidth={s.strokeWidth || 3} 
+                                pointerLength={12} 
+                                pointerWidth={12}
+                                opacity={guidelineAnimation}
+                                shadowBlur={guidelineAnimation > 0.5 ? 8 : 0}
+                                shadowColor={strokeColor}
+                              />
+                              {/* Circle after arrow end point */}
+                              <Circle
+                                x={circleX}
+                                y={circleY}
+                                radius={15}
+                                fill="#10b981"
+                                stroke="#000000"
+                                strokeWidth={3}
+                                opacity={guidelineAnimation}
+                                shadowBlur={guidelineAnimation > 0.5 ? 5 : 0}
+                                shadowColor="#10b981"
+                              />
+                            </React.Fragment>
+                          );
+                        } else {
+                          return (
+                            <KonvaLine 
+                              key={s.id} 
+                              points={points} 
+                              stroke={strokeColor} 
+                              strokeWidth={s.strokeWidth || 3}
+                              opacity={guidelineAnimation}
+                              shadowBlur={guidelineAnimation > 0.5 ? 8 : 0}
+                              shadowColor={strokeColor}
+                            />
+                          );
+                        }
+                      }
+                      
+                      // Initial show: All guidelines with stagger effect
                       const delay = index * 50; // Stagger animation for each shape
                       const delayedOpacity = guidelineAnimation > 0 ? Math.max(0, Math.min(1, (guidelineAnimation * 1000 - delay) / 500)) : 0;
                       

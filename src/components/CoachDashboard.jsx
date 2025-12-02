@@ -1,5 +1,6 @@
+
 import { useState, useEffect } from "react";
-import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter, RefreshCw } from "lucide-react";
+import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter, RefreshCw, Link as LinkIcon, Copy, Check } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { PlayerActivityTable } from "./PlayerActivityTable";
@@ -24,6 +25,9 @@ export function CoachDashboard({ onBack }) {
   });
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [registrationLink, setRegistrationLink] = useState(null);
+  const [teamInfo, setTeamInfo] = useState(null);
+  const [linkCopied, setLinkCopied] = useState(false);
   const { user } = useAuth();
 
   // Fetch coach dashboard data
@@ -35,6 +39,19 @@ export function CoachDashboard({ onBack }) {
       }
     } catch (error) {
       console.error('Error fetching coach stats:', error);
+    }
+  };
+
+  // Fetch registration link
+  const fetchRegistrationLink = async () => {
+    try {
+      const response = await axios.get('/coach-stats/registration-link');
+      if (response.data.success) {
+        setRegistrationLink(response.data.data.registrationLink);
+        setTeamInfo(response.data.data.teamInfo);
+      }
+    } catch (error) {
+      console.error('Error fetching registration link:', error);
     }
   };
 
@@ -54,11 +71,20 @@ export function CoachDashboard({ onBack }) {
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
-      await Promise.all([fetchStats(), fetchPlayers()]);
+      await Promise.all([fetchStats(), fetchPlayers(), fetchRegistrationLink()]);
       setLoading(false);
     };
     loadData();
   }, []);
+
+  // Copy registration link to clipboard
+  const handleCopyLink = () => {
+    if (registrationLink) {
+      navigator.clipboard.writeText(registrationLink);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 2000);
+    }
+  };
 
   // Refresh players when search or filter changes (debounced)
   useEffect(() => {
@@ -145,6 +171,69 @@ export function CoachDashboard({ onBack }) {
           </div>
         ) : (
           <>
+            {/* Registration Link Card */}
+            <div className="glass-panel rounded-3xl shadow-xl border border-white/30 overflow-hidden mb-6 bg-gradient-to-r from-green-500/10 to-blue-500/10">
+              <div className="p-6">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
+                    <LinkIcon className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="font-semibold text-foreground">Team Registration Link</h2>
+                    <p className="text-sm text-muted-foreground">Share this link with players to join your team</p>
+                  </div>
+                </div>
+                
+                {registrationLink && teamInfo ? (
+                  <div className="space-y-4">
+                    <div className="flex gap-3">
+                      <div className="flex-1 bg-white/50 rounded-lg p-3 border border-white/30">
+                        <p className="text-xs text-muted-foreground mb-1">Registration Link</p>
+                        <p className="text-sm font-mono text-foreground break-all">{registrationLink}</p>
+                      </div>
+                      <Button
+                        onClick={handleCopyLink}
+                        className="bg-green-600 hover:bg-green-700 flex items-center gap-2"
+                      >
+                        {linkCopied ? (
+                          <>
+                            <Check className="w-4 h-4" />
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4" />
+                            Copy
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    
+                    <div className="flex items-center gap-4 text-sm">
+                      <div className="flex items-center gap-2">
+                        <Users className="w-4 h-4 text-muted-foreground" />
+                        <span className="text-muted-foreground">Team Status:</span>
+                        <span className="font-semibold text-foreground">
+                          {teamInfo.currentMembers}/{teamInfo.maxMembers} members
+                        </span>
+                      </div>
+                      <div className="w-px h-4 bg-border" />
+                      <div className="flex items-center gap-2">
+                        <span className="text-muted-foreground">Available Slots:</span>
+                        <span className={`font-semibold ${teamInfo.availableSlots > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {teamInfo.availableSlots}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-center py-4">
+                    <p className="text-sm text-muted-foreground">Loading registration link...</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Performance Summary Cards */}
             <PerformanceSummary stats={teamStats} />
 
