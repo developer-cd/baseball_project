@@ -1,8 +1,12 @@
 import express from 'express';
 import User from '../models/User.js';
 import FieldPosition from '../models/FieldPosition.js';
+import Team from '../models/Team.js';
+import Organization from '../models/Organization.js';
+import Subscription from '../models/Subscription.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { coachOnly } from '../middleware/coachMiddleware.js';
+import { getCoachPlayers, getCoachTeams, getCoachTeamCount } from '../utils/teamHelpers.js';
 import { generateRegistrationToken, generateRegistrationLink } from '../utils/tokenGenerator.js';
 
 const router = express.Router();
@@ -24,13 +28,8 @@ router.get('/stats', protect, coachOnly, async (req, res) => {
   try {
     const coachId = req.user._id;
     
-    // Get only players in this coach's team
-    const players = await User.find({ 
-      role: 'user',
-      coachId: coachId
-    })
-      .select('username email createdAt lastLogin')
-      .lean();
+    // Get players using new Team/PlayerTeam structure (with legacy fallback)
+    const players = await getCoachPlayers(coachId);
 
     const totalPlayers = players.length;
     
@@ -82,23 +81,17 @@ router.get('/players', protect, coachOnly, async (req, res) => {
     const coachId = req.user._id;
     const { search = '', filter = '' } = req.query;
 
-    // Build query - only players in this coach's team
-    const query = { 
-      role: 'user',
-      coachId: coachId
-    };
+    // Get players using new Team/PlayerTeam structure (with legacy fallback)
+    let players = await getCoachPlayers(coachId);
+    
+    // Apply search filter if provided
     if (search) {
-      query.$or = [
-        { username: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
+      const searchLower = search.toLowerCase();
+      players = players.filter(p => 
+        (p.username && p.username.toLowerCase().includes(searchLower)) ||
+        (p.email && p.email && p.email.toLowerCase().includes(searchLower))
+      );
     }
-
-    // Get players in coach's team
-    const players = await User.find(query)
-      .select('username email createdAt lastLogin')
-      .sort({ createdAt: -1 })
-      .lean();
 
     // Calculate active status
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -225,6 +218,100 @@ router.get('/players', protect, coachOnly, async (req, res) => {
   }
 });
 
+// Create new team (requires active plan-level subscription)
+router.post('/teams', protect, coachOnly, async (req, res) => {
+  try {
+    const coachId = req.user._id;
+    const { teamName } = req.body;
+
+    if (!teamName || teamName.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'Team name is required',
+      });
+    }
+
+    // Get coach user
+    const coach = await User.findById(coachId);
+    if (!coach || coach.role !== 'coach') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only coaches can create teams',
+      });
+    }
+
+    // Get or create organization for coach
+    let organization = null;
+    if (coach.organizationId) {
+      organization = await Organization.findById(coach.organizationId);
+    }
+
+    if (!organization) {
+      return res.status(400).json({
+        success: false,
+        message: 'Organization not found. Please complete coach signup first.',
+      });
+    }
+
+    // Check active plan-level subscription
+    const activeSubscription = await Subscription.findOne({
+      coachId,
+      organizationId: organization._id,
+      isActive: true,
+      status: 'active',
+      endDate: { $gt: new Date() },
+    });
+
+    if (!activeSubscription) {
+      return res.status(402).json({
+        success: false,
+        message: 'No active subscription found. Please renew your plan to create teams.',
+      });
+    }
+
+    const planType = activeSubscription.pricingType || organization.planType || organization.type || 'individual';
+
+    // Enforce team limits based on plan
+    const existingTeamCount = await getCoachTeamCount(coachId);
+    if (planType === 'individual' && existingTeamCount >= 1) {
+      return res.status(403).json({
+        success: false,
+        message: 'Individual plan allows only 1 team. Upgrade to organization plan to create more teams.',
+      });
+    }
+
+    // Team subscription end date aligns with plan subscription end date
+    const subscriptionEndDate = activeSubscription.endDate || new Date();
+
+    const team = new Team({
+      name: teamName.trim(),
+      organizationId: organization._id,
+      coachId: coach._id,
+      maxSeats: 20,
+      currentSeats: 0,
+      subscriptionStatus: 'active',
+      subscriptionEndDate: subscriptionEndDate,
+      pricingType: planType,
+    });
+
+    await team.save();
+
+    res.json({
+      success: true,
+      data: {
+        team,
+      },
+    });
+  } catch (error) {
+    console.error('Error creating team:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error creating team',
+      error: error.message,
+    });
+  }
+});
+
 // Get coach registration link
 router.get('/registration-link', protect, coachOnly, async (req, res) => {
   try {
@@ -244,12 +331,15 @@ router.get('/registration-link', protect, coachOnly, async (req, res) => {
       coach.registrationToken = generateRegistrationToken();
       await coach.save();
     }
-    
-    // Get team members count
-    const teamMembersCount = await User.countDocuments({ 
-      coachId: coach._id,
-      role: 'user'
-    });
+
+    // Get players using new Team/PlayerTeam structure (with legacy fallback)
+    const players = await getCoachPlayers(coachId);
+    const teamMembersCount = players.length;
+
+    // Approximate team capacity: 20 players per team
+    const teams = await getCoachTeams(coachId);
+    const maxMembers = teams.length > 0 ? teams.length * 20 : 20;
+    const availableSlots = Math.max(0, maxMembers - teamMembersCount);
     
     // Generate registration link
     const registrationLink = generateRegistrationLink(coach.registrationToken);
@@ -261,8 +351,8 @@ router.get('/registration-link', protect, coachOnly, async (req, res) => {
         registrationToken: coach.registrationToken,
         teamInfo: {
           currentMembers: teamMembersCount,
-          maxMembers: 15,
-          availableSlots: 15 - teamMembersCount
+          maxMembers,
+          availableSlots
         }
       }
     });
@@ -283,7 +373,7 @@ router.get('/players/:id', protect, coachOnly, async (req, res) => {
     const coachId = req.user._id;
     const { id } = req.params;
 
-    const player = await User.findById(id).select('username email createdAt lastLogin coachId').lean();
+    const player = await User.findById(id).select('username email createdAt lastLogin').lean();
     
     if (!player || player.role !== 'user') {
       return res.status(404).json({
@@ -292,8 +382,13 @@ router.get('/players/:id', protect, coachOnly, async (req, res) => {
       });
     }
     
-    // Verify player belongs to this coach's team
-    if (player.coachId?.toString() !== coachId.toString()) {
+    // Verify player belongs to this coach's team (using new or legacy structure)
+    const coachPlayers = await getCoachPlayers(coachId);
+    const playerInTeam = coachPlayers.some(p => 
+      (p._id?.toString() || p.id?.toString()) === id
+    );
+    
+    if (!playerInTeam) {
       return res.status(403).json({
         success: false,
         message: 'Access denied. This player is not in your team.'

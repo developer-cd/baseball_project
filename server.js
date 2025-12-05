@@ -8,6 +8,7 @@ import adminRoutes from "./routes/adminRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import adminStatsRoutes from "./routes/adminStats.js";
 import coachStatsRoutes from "./routes/coachStats.js";
+import stripeRoutes from "./routes/stripeRoutes.js";
 import socketService from "./services/socketService.js";
 
 dotenv.config();
@@ -17,6 +18,12 @@ const app = express();
 const server = createServer(app);
 
 app.use(cors());
+
+// Stripe webhook must be before express.json() middleware
+// because Stripe sends raw body for webhook signature verification
+app.use("/api/stripe", stripeRoutes);
+
+// JSON body parser for all other routes
 app.use(express.json());
 
 // Routes

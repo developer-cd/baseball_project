@@ -2,9 +2,12 @@ import express from 'express';
 import User from '../models/User.js';
 import FieldPosition from '../models/FieldPosition.js';
 import Scenario from '../models/Scenario.js';
+import Team from '../models/Team.js';
+import Subscription from '../models/Subscription.js';
 import { protect } from '../middleware/authMiddleware.js';
 import { adminOnly } from '../middleware/adminMiddleware.js';
 import { generateRegistrationToken, generateRegistrationLink } from '../utils/tokenGenerator.js';
+import { getCoachPlayers } from '../utils/teamHelpers.js';
 
 const router = express.Router();
 
@@ -101,7 +104,48 @@ router.get('/stats', protect, adminOnly, async (req, res) => {
         $limit: 5
       }
     ]);
-    
+
+    // ===== Billing & Coach Subscription Stats =====
+    // Total coaches
+    const totalCoaches = await User.countDocuments({ role: 'coach' });
+
+    // Active subscriptions (from Subscription model)
+    const activeSubscriptions = await Subscription.countDocuments({
+      status: 'active',
+      isActive: true,
+    });
+
+    // Distinct paying coaches (with at least one active subscription)
+    const payingCoachIds = await Subscription.distinct('coachId', {
+      status: 'active',
+      isActive: true,
+    });
+    const payingCoaches = payingCoachIds.length;
+
+    // Active teams (with active subscription)
+    const activeTeams = await Team.countDocuments({
+      subscriptionStatus: 'active',
+      isActive: true,
+    });
+
+    // Total revenue (sum of all active subscription amounts)
+    const revenueAgg = await Subscription.aggregate([
+      {
+        $match: {
+          status: 'active',
+          isActive: true,
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalAmount: { $sum: '$amount' },
+        },
+      },
+    ]);
+
+    const totalRevenue = revenueAgg.length > 0 ? revenueAgg[0].totalAmount : 0;
+
     const stats = {
       totalUsers,
       usersByRole: usersByRole.reduce((acc, item) => {
@@ -114,7 +158,14 @@ router.get('/stats', protect, adminOnly, async (req, res) => {
       scenariosCount,
       newUsersThisMonth,
       popularScenarios,
-      recentActivity: formattedActivity
+      recentActivity: formattedActivity,
+      billingStats: {
+        totalCoaches,
+        payingCoaches,
+        activeTeams,
+        activeSubscriptions,
+        totalRevenue,
+      },
     };
     
     res.json({
@@ -429,11 +480,9 @@ router.get('/coaches/:coachId/registration-link', protect, adminOnly, async (req
       await coach.save();
     }
     
-    // Get team members count
-    const teamMembersCount = await User.countDocuments({ 
-      coachId: coach._id,
-      role: 'user'
-    });
+    // Get team members count (using new structure with legacy fallback)
+    const players = await getCoachPlayers(coach._id);
+    const teamMembersCount = players.length;
     
     // Generate registration link
     const registrationLink = generateRegistrationLink(coach.registrationToken);
@@ -480,16 +529,17 @@ router.get('/coaches/:coachId/team', protect, adminOnly, async (req, res) => {
       });
     }
     
-    // Get team members
-    const teamMembers = await User.find({ 
-      coachId: coach._id,
-      role: 'user'
-    })
-    .select('username email createdAt lastLogin')
-    .sort({ createdAt: -1 })
-    .lean();
-    
+    // Get team members (using new structure with legacy fallback)
+    const teamMembers = await getCoachPlayers(coach._id);
     const teamMembersCount = teamMembers.length;
+    
+    // Format team members for response
+    const formattedTeamMembers = teamMembers.map(member => ({
+      username: member.username,
+      email: member.email,
+      createdAt: member.createdAt,
+      lastLogin: member.lastLogin
+    })).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     
     res.json({
       success: true,
@@ -499,7 +549,7 @@ router.get('/coaches/:coachId/team', protect, adminOnly, async (req, res) => {
           username: coach.username,
           email: coach.email
         },
-        teamMembers,
+        teamMembers: formattedTeamMembers,
         teamInfo: {
           currentMembers: teamMembersCount,
           maxMembers: 15,

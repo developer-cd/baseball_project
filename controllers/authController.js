@@ -1,6 +1,10 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Organization from "../models/Organization.js";
+import { getCoachPlayers, checkTeamAvailability, addPlayerToTeam, getTeamByPasscode } from "../utils/teamHelpers.js";
+import Team from "../models/Team.js";
+import stripeService, { createCustomer, createCheckoutSession } from "../services/stripeService.js";
 
 // Helper: generate tokens
 const generateAccessToken = (id) => {
@@ -8,6 +12,116 @@ const generateAccessToken = (id) => {
 };
 const generateRefreshToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_REFRESH_SECRET, { expiresIn: "7d" });
+};
+
+// ✅ Coach Self Registration (Coach Signup)
+export const registerCoach = async (req, res) => {
+  try {
+    const { username, email, password, organizationName, accountType } = req.body;
+
+    // Basic validation
+    if (!username || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Username, email and password are required",
+      });
+    }
+
+    // Validate account type
+    const normalizedAccountType = (accountType || "individual").toLowerCase().trim();
+    const validAccountTypes = ["individual", "organization"];
+    if (!validAccountTypes.includes(normalizedAccountType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid account type. Must be 'individual' or 'organization'",
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await User.findOne({
+      $or: [{ email }, { username }],
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User with this email or username already exists",
+      });
+    }
+
+    // Create coach user
+    const coachUser = new User({
+      username,
+      email,
+      password, // Will be hashed by pre-save middleware
+      role: "coach",
+      isOrganizationOwner: true,
+      playerType: "email",
+    });
+
+    await coachUser.save();
+
+    // Create organization for this coach
+    const org = new Organization({
+      name: organizationName && organizationName.trim() !== "" ? organizationName.trim() : `${username}'s ${normalizedAccountType === "organization" ? "Organization" : "Team"}`,
+      ownerId: coachUser._id,
+      type: normalizedAccountType,
+      planType: normalizedAccountType,
+      hasActiveSubscription: false,
+    });
+
+    await org.save();
+
+    // Link user to organization
+    coachUser.organizationId = org._id;
+    await coachUser.save();
+
+    // ===== Stripe Plan Subscription (signup-time) =====
+    // Determine plan price based on account type
+    const planAmount = normalizedAccountType === "organization" ? 249 : 299; // 3-month plan pricing
+    const pricingType = normalizedAccountType; // 'individual' | 'organization'
+
+    // Ensure Stripe customer exists for this coach
+    let stripeCustomerId = coachUser.stripeCustomerId;
+    if (!stripeCustomerId) {
+      const customer = await createCustomer({
+        email: coachUser.email,
+        name: coachUser.username,
+        metadata: {
+          userId: coachUser._id.toString(),
+          userRole: coachUser.role,
+        },
+      });
+
+      stripeCustomerId = customer.id;
+      coachUser.stripeCustomerId = stripeCustomerId;
+      await coachUser.save();
+    }
+
+    // Create Stripe checkout session for plan subscription
+    const session = await createCheckoutSession({
+      customerId: stripeCustomerId,
+      amount: planAmount,
+      teamId: null, // plan-level, not per-team
+      organizationId: org._id.toString(),
+      coachId: coachUser._id.toString(),
+      pricingType,
+    });
+
+    // Return checkout URL to frontend
+    res.status(201).json({
+      success: true,
+      message: "Coach account created. Redirecting to payment...",
+      checkoutUrl: session.url,
+      sessionId: session.id,
+    });
+  } catch (error) {
+    console.error("Coach registration error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
 
 // ✅ Register via Coach Team Link (Token-based registration)
@@ -36,17 +150,37 @@ export const registerViaToken = async (req, res) => {
       });
     }
     
-    // Check if team is full (max 15 members)
-    const teamMembersCount = await User.countDocuments({ 
+    // Find coach's first active team (for new structure)
+    // If no team exists, we'll use legacy coachId approach
+    let team = await Team.findOne({ 
       coachId: coach._id,
-      role: 'user'
-    });
+      isActive: true
+    }).sort({ createdAt: 1 }); // Get first team
     
-    if (teamMembersCount >= 15) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Coach team is full. Maximum 15 members allowed." 
+    // Check team availability (new structure) or legacy count
+    let teamAvailability;
+    if (team) {
+      // Use new Team structure
+      teamAvailability = await checkTeamAvailability(team._id);
+      if (!teamAvailability.available) {
+        return res.status(400).json({ 
+          success: false,
+          message: `Team is full. Maximum ${teamAvailability.maxSeats} members allowed.` 
+        });
+      }
+    } else {
+      // Fallback to legacy structure
+      const teamMembersCount = await User.countDocuments({ 
+        coachId: coach._id,
+        role: 'user'
       });
+      
+      if (teamMembersCount >= 15) {
+        return res.status(400).json({ 
+          success: false,
+          message: "Coach team is full. Maximum 15 members allowed." 
+        });
+      }
     }
     
     // Check if user already exists
@@ -64,16 +198,28 @@ export const registerViaToken = async (req, res) => {
       });
     }
     
-    // Create new user with coachId
+    // Create new user
     const newUser = new User({
       username,
       email,
       password, // Will be hashed by pre-save middleware
       role: 'user',
+      playerType: 'email', // Registered via email
+      // Keep coachId for backward compatibility
       coachId: coach._id
     });
     
     await newUser.save();
+    
+    // Add to team if using new structure
+    if (team) {
+      try {
+        await addPlayerToTeam(newUser._id, team._id);
+      } catch (error) {
+        // If adding to team fails, user is still created with coachId
+        console.error('Error adding player to team:', error);
+      }
+    }
     
     // Generate tokens for auto-login
     const accessToken = generateAccessToken(newUser._id);
@@ -135,13 +281,33 @@ export const validateRegistrationToken = async (req, res) => {
       });
     }
     
-    // Check if team is full
-    const teamMembersCount = await User.countDocuments({ 
+    // Check team availability using new structure or legacy
+    let teamInfo;
+    const team = await Team.findOne({ 
       coachId: coach._id,
-      role: 'user'
-    });
+      isActive: true
+    }).sort({ createdAt: 1 });
     
-    const isTeamFull = teamMembersCount >= 15;
+    if (team) {
+      // Use new Team structure
+      const availability = await checkTeamAvailability(team._id);
+      teamInfo = {
+        currentMembers: availability.currentSeats,
+        maxMembers: availability.maxSeats,
+        isFull: !availability.available
+      };
+    } else {
+      // Fallback to legacy structure
+      const teamMembersCount = await User.countDocuments({ 
+        coachId: coach._id,
+        role: 'user'
+      });
+      teamInfo = {
+        currentMembers: teamMembersCount,
+        maxMembers: 15,
+        isFull: teamMembersCount >= 15
+      };
+    }
     
     res.json({
       success: true,
@@ -150,11 +316,7 @@ export const validateRegistrationToken = async (req, res) => {
         username: coach.username,
         email: coach.email
       },
-      teamInfo: {
-        currentMembers: teamMembersCount,
-        maxMembers: 15,
-        isFull: isTeamFull
-      }
+      teamInfo: teamInfo
     });
     
   } catch (error) {

@@ -5,6 +5,7 @@ import {
   refresh,
   forgotPassword,
   resetPassword,
+  registerCoach,
   registerViaToken,
   validateRegistrationToken,
 } from "../controllers/authController.js";
@@ -18,6 +19,9 @@ router.post("/logout", logout);
 router.post("/refresh", refresh);
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
+
+// Coach self registration (coach signup)
+router.post("/register/coach", registerCoach);
 
 // Token-based registration for coach teams
 router.post("/register/coach-team", registerViaToken);
