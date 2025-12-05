@@ -1,6 +1,6 @@
 
 import { useState, useEffect } from "react";
-import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter, RefreshCw, Link as LinkIcon, Copy, Check } from "lucide-react";
+import { ArrowLeft, Users, TrendingUp, Activity, Trophy, ChevronRight, Search, Filter, RefreshCw, Link as LinkIcon, Copy, Check, Plus } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { PlayerActivityTable } from "./PlayerActivityTable";
@@ -28,6 +28,8 @@ export function CoachDashboard({ onBack }) {
   const [registrationLink, setRegistrationLink] = useState(null);
   const [teamInfo, setTeamInfo] = useState(null);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
   const { user } = useAuth();
 
   // Fetch coach dashboard data
@@ -83,6 +85,36 @@ export function CoachDashboard({ onBack }) {
       navigator.clipboard.writeText(registrationLink);
       setLinkCopied(true);
       setTimeout(() => setLinkCopied(false), 2000);
+    }
+  };
+
+  // Create new team and redirect to Stripe Checkout
+  const handleCreateTeam = async () => {
+    if (!newTeamName.trim()) {
+      alert("Please enter a team name");
+      return;
+    }
+
+    try {
+      setCheckoutLoading(true);
+      const response = await axios.post("/coach-stats/teams", {
+        teamName: newTeamName.trim(),
+      });
+
+      if (response.data.success) {
+        setNewTeamName("");
+        await Promise.all([fetchStats(), fetchPlayers(), fetchRegistrationLink()]);
+      } else {
+        alert(response.data.message || "Failed to create team");
+      }
+    } catch (error) {
+      console.error("Error creating team checkout session:", error);
+      alert(
+        "Error creating team checkout session: " +
+          (error.response?.data?.message || error.message)
+      );
+    } finally {
+      setCheckoutLoading(false);
     }
   };
 
@@ -174,13 +206,34 @@ export function CoachDashboard({ onBack }) {
             {/* Registration Link Card */}
             <div className="glass-panel rounded-3xl shadow-xl border border-white/30 overflow-hidden mb-6 bg-gradient-to-r from-green-500/10 to-blue-500/10">
               <div className="p-6">
-                <div className="flex items-center gap-3 mb-4">
-                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
-                    <LinkIcon className="w-5 h-5 text-white" />
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/30">
+                      <LinkIcon className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <h2 className="font-semibold text-foreground">Team Registration Link</h2>
+                      <p className="text-sm text-muted-foreground">Share this link with players to join your team</p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="font-semibold text-foreground">Team Registration Link</h2>
-                    <p className="text-sm text-muted-foreground">Share this link with players to join your team</p>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      placeholder="New team name"
+                      value={newTeamName}
+                      onChange={(e) => setNewTeamName(e.target.value)}
+                      className="px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 bg-white/80"
+                    />
+                    <Button
+                      size="sm"
+                      className="bg-green-600 hover:bg-green-700 flex items-center gap-2"
+                      onClick={handleCreateTeam}
+                      disabled={checkoutLoading || !newTeamName.trim()}
+                    >
+                      <Plus className="w-4 h-4" />
+                      {checkoutLoading ? "Redirecting..." : "Create / Activate Team"}
+                    </Button>
                   </div>
                 </div>
                 

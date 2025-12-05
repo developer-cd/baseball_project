@@ -1265,6 +1265,56 @@ export function AdminDashboard({ onBack, onViewCoachDashboard }) {
           </div>
         </div>
 
+        {/* Billing & Coach Stats */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6 mb-8">
+          <div className="glass-panel rounded-2xl p-6 border border-white/30 shadow-lg hover:shadow-xl transition-all group">
+            <div className="flex items-start justify-between mb-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                <Users className="w-6 h-6 text-white" />
+              </div>
+            </div>
+            <p className="text-sm text-muted-foreground font-medium mb-1">Coaches</p>
+            <p className="text-3xl font-bold text-foreground">
+              {loading ? '...' : stats?.billingStats?.totalCoaches || 0}
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              {stats?.billingStats
+                ? `${stats.billingStats.payingCoaches || 0} paying • ${stats.billingStats.activeTeams || 0} active teams`
+                : 'Loading...'}
+            </p>
+          </div>
+
+          <div className="glass-panel rounded-2xl p-6 border border-white/30 shadow-lg hover:shadow-xl transition-all group">
+            <div className="flex items-start justify-between mb-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-purple-500 to-purple-600 flex items-center justify-center shadow-lg shadow-purple-500/30">
+                <Activity className="w-6 h-6 text-white" />
+              </div>
+            </div>
+            <p className="text-sm text-muted-foreground font-medium mb-1">Active Subscriptions</p>
+            <p className="text-3xl font-bold text-foreground">
+              {loading ? '...' : stats?.billingStats?.activeSubscriptions || 0}
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Across all teams and organizations
+            </p>
+          </div>
+
+          <div className="glass-panel rounded-2xl p-6 border border-white/30 shadow-lg hover:shadow-xl transition-all group">
+            <div className="flex items-start justify-between mb-4">
+              <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
+                <BarChart3 className="w-6 h-6 text-white" />
+              </div>
+            </div>
+            <p className="text-sm text-muted-foreground font-medium mb-1">Total Revenue</p>
+            <p className="text-3xl font-bold text-foreground">
+              {loading ? '...' : `$${(stats?.billingStats?.totalRevenue || 0).toLocaleString()}`}
+            </p>
+            <p className="text-xs text-muted-foreground mt-2">
+              Sum of active subscriptions (team access fees)
+            </p>
+          </div>
+        </div>
+
         {/* Management Tabs */}
         <div className="glass-panel rounded-3xl shadow-xl border border-white/30 overflow-hidden">
           <Tabs value={activeTab} onValueChange={setActiveTab}>

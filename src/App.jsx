@@ -2,6 +2,8 @@ import { BrowserRouter as Router, Routes, Route, useLocation, Navigate } from "r
 import Navbar from "./components/Navbar";
 import Login from "./pages/Login";
 import Register from "./pages/Register";
+import CoachSignup from "./pages/CoachSignup";
+import CoachPaymentSuccess from "./pages/CoachPaymentSuccess";
 import Home from "./pages/Home";
 import Ground from "./pages/Ground";
 import BrowseSituation from "./pages/BrowseSituation";
@@ -17,8 +19,8 @@ import { SocketProvider } from "./context/SocketContext";
 function AppWrapper() {
   const location = useLocation();
 
-  // login aur register par navbar hide
-  const hideNavbar = ["/login", "/register"].includes(location.pathname);
+  // login, player-register, coach-signup aur payment-success par navbar hide
+  const hideNavbar = ["/login", "/register", "/coach-signup", "/coach-payment-success"].includes(location.pathname);
 
   return (
     <>
@@ -40,6 +42,20 @@ function AppWrapper() {
               <Register />
             </GuestRoute>
           }
+        />
+
+        <Route
+          path="/coach-signup"
+          element={
+            <GuestRoute>
+              <CoachSignup />
+            </GuestRoute>
+          }
+        />
+
+        <Route
+          path="/coach-payment-success"
+          element={<CoachPaymentSuccess />}
         />
 
         {/* Protected routes */}

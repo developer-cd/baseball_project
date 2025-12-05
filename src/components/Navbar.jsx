@@ -37,10 +37,10 @@ export default function Navbar() {
                   Login
                 </Link>
                 <Link
-                  to="/register"
+                  to="/coach-signup"
                   className="px-4 py-2 bg-indigo-600 text-white font-medium rounded-lg hover:bg-indigo-700 transition"
                 >
-                  Register
+                  Coach Signup
                 </Link>
               </>
             ) : (
